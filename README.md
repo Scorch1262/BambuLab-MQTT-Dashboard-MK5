@@ -1,6 +1,12 @@
-# Bambu Lab + Formlabs Drucker Dashboard
+# Bambu Lab Dashboard
 
 ![Bild](Unbenannt.PNG)
+
+Getestet mit:
+- BambuLab X1C
+- BambuLab X1E
+- BambuLab A1 Mini
+- Ultimaker S5
 
 Lokales Web-Dashboard fuer Bambu Lab (MQTT) und Formlabs (HTTP) 3D-Drucker.
 Fortschritt, aktuelle Datei, Kamera (Bambu), AMS-Filamente (Bambu),
