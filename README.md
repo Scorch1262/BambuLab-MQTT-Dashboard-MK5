@@ -1,5 +1,7 @@
 # Bambu Lab + Formlabs Drucker Dashboard
 
+![Bild](Unbenannt.PNG)
+
 Lokales Web-Dashboard fuer Bambu Lab (MQTT) und Formlabs (HTTP) 3D-Drucker.
 Fortschritt, aktuelle Datei, Kamera (Bambu), AMS-Filamente (Bambu),
 Kammertemperatur (Bambu) und geladenes Material (Formlabs) in einem
