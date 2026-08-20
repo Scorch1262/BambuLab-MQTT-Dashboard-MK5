@@ -1,0 +1,18 @@
+# Von jedem Nutzer lokal erzeugt - enthaelt IPs, Access Codes, API-Keys
+config.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PyInstaller-Buildartefakte
+build/
+dist/
+*.spec
+
+# Editor/OS
+.DS_Store
+.vscode/
+.idea/

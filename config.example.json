@@ -1,0 +1,72 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8000
+  },
+  "preform_server": "http://localhost:44388",
+  "extras_mqtt": {
+    "enabled": false,
+    "host": "",
+    "port": 1883,
+    "username": "",
+    "password": "",
+    "tls": false
+  },
+  "printers": [
+    {
+      "id": "beispiel-bambu",
+      "name": "Bambu Lab X1C",
+      "type": "bambu",
+      "ip": "192.168.1.50",
+      "access_code": "12345678",
+      "serial": "00M00A000000000",
+      "mqtt_port": 8883,
+      "camera_port": 6000,
+      "extras": []
+    },
+    {
+      "id": "beispiel-formlabs",
+      "name": "Form 4",
+      "type": "formlabs",
+      "ip": "192.168.1.51",
+      "extras": []
+    },
+    {
+      "id": "beispiel-formlabs-wash",
+      "name": "Form Wash L",
+      "type": "formlabs_wash",
+      "ip": "192.168.1.52",
+      "extras": []
+    },
+    {
+      "id": "beispiel-octoprint",
+      "name": "Ender 3 (OctoPrint)",
+      "type": "octoprint",
+      "ip": "192.168.1.53",
+      "api_key": "DEIN-OCTOPRINT-API-KEY",
+      "port": 80,
+      "https": false,
+      "webcam_url": "",
+      "extras": []
+    },
+    {
+      "id": "beispiel-creality",
+      "name": "Creality K1C",
+      "type": "creality_k1c",
+      "ip": "192.168.1.54",
+      "api_key": "",
+      "port": 7125,
+      "webcam_url": "",
+      "extras": []
+    },
+    {
+      "id": "beispiel-ultimaker",
+      "name": "Ultimaker S5",
+      "type": "ultimaker",
+      "ip": "192.168.1.55",
+      "port": 80,
+      "webcam_url": "",
+      "extras": []
+    }
+  ]
+}

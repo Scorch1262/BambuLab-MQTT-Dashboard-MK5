@@ -1,0 +1,110 @@
+name: Build
+
+# Baut bei jedem Push automatisch:
+#   - eine Windows-.exe (PyInstaller --onefile) fuer das Hauptprogramm
+#     (DruckerDashboard) UND eine separate Windows-.exe fuer den
+#     FTPS-Upload-Helfer (FtpsUploadHelper) - siehe UEBERGABE.md,
+#     Abschnitt zu v1.5.3, fuer die Begruendung: der Upload laeuft
+#     bewusst ueber eine EIGENSTAENDIGE exe statt eines Selbstaufrufs
+#     der Haupt-exe, da Letzteres von Sicherheitssoftware (u. a.
+#     Windows Defender) als verdaechtiges Verhalten eingestuft werden
+#     kann. Beide exes MUESSEN im selben Ordner liegen (das Hauptprogramm
+#     sucht die Helfer-exe neben sich selbst), werden deshalb gemeinsam
+#     in einem Zip ausgeliefert.
+#   - ein natives macOS-Binary-Paar fuer Apple Silicon (arm64), ebenfalls
+#     PyInstaller --onefile, auf einem macos-14-Runner (die GitHub-
+#     gehosteten macos-14-Runner sind seit deren Einfuehrung native
+#     Apple-Silicon-Maschinen - kein Cross-Compiling noetig)
+# Bei einem Tag-Push (Format "vX.Y.Z") werden beide Artefakte zusaetzlich
+# an ein GitHub Release angehaengt, benannt nach der Version in
+# APP_VERSION (app.py) bzw. dem Tag.
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*.*.*" ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset_name_suffix: windows
+          - os: macos-14   # nativer Apple-Silicon (arm64) Runner
+            asset_name_suffix: macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Abhaengigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Versionsnummer aus app.py lesen
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(python3 -c "import re; print(re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"', open('app.py', encoding='utf-8').read()).group(1))")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Erkannte Version: $VERSION"
+
+      - name: Hauptprogramm mit PyInstaller bauen
+        run: pyinstaller --onefile --name DruckerDashboard --console app.py
+
+      - name: FTPS-Upload-Helfer mit PyInstaller bauen
+        run: pyinstaller --onefile --name FtpsUploadHelper --console ftps_upload_helper.py
+
+      - name: macOS - ausfuehrbar machen + beide zusammen zippen (bewahrt Exec-Bit)
+        if: runner.os == 'macOS'
+        run: |
+          chmod +x dist/DruckerDashboard dist/FtpsUploadHelper
+          mkdir -p out
+          cd dist && zip -j "../out/DruckerDashboard-v${{ steps.version.outputs.version }}-${{ matrix.asset_name_suffix }}.zip" DruckerDashboard FtpsUploadHelper
+
+      - name: Windows - beide exes zusammen zippen
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Compress-Archive -Path "dist/DruckerDashboard.exe", "dist/FtpsUploadHelper.exe" -DestinationPath "out/DruckerDashboard-v${{ steps.version.outputs.version }}-${{ matrix.asset_name_suffix }}.zip"
+
+      - name: Als Build-Artifact hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: DruckerDashboard-v${{ steps.version.outputs.version }}-${{ matrix.asset_name_suffix }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: An GitHub Release anhaengen (nur bei Tag-Push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          name: "v${{ steps.version.outputs.version }}"
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+# Hinweis macOS/Gatekeeper: Die macOS-Binaries sind NICHT signiert oder
+# notarisiert (dafuer waere eine kostenpflichtige Apple-Developer-ID
+# noetig). Beim ersten Start blockiert Gatekeeper die Datei. Abhilfe
+# fuer Nutzer: im Finder Rechtsklick -> "Oeffnen" -> "Trotzdem oeffnen",
+# oder im Terminal: xattr -dr com.apple.quarantine DruckerDashboard
+#
+# WICHTIG: Beide exes/Binaries (DruckerDashboard + FtpsUploadHelper)
+# muessen nach dem Entpacken im SELBEN Ordner bleiben - das Hauptprogramm
+# sucht die Helfer-exe direkt neben sich selbst (siehe
+# _find_ftps_upload_helper() in app.py). Fehlt die Helfer-exe, faellt
+# das Programm automatisch auf einen langsameren Fallback-Mechanismus
+# zurueck (Selbstaufruf mit Sentinel-Flag) - funktioniert weiterhin,
+# ist aber genau das Verhalten, das seit v1.5.3 vermieden werden soll.
