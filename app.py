@@ -36,7 +36,7 @@ Konfiguration:         config.json (liegt im selben Ordner wie das Skript
 # Release-Tag und Datei-Namen zu erzeugen. Bei jeder ausgelieferten
 # Aenderung hier erhoehen (siehe Abschnitt in UEBERGABE.md fuer die
 # Regeln, was Major/Minor/Patch bedeutet).
-APP_VERSION = "1.5.5"
+APP_VERSION = "1.5.6"
 
 import os
 import sys
@@ -552,13 +552,35 @@ class PrinterConnection:
                 "kann nicht gestartet werden."
             )
         ams_summary = ams_summary or {}
+        # WICHTIG (v1.5.6): Der Befehl enthielt bisher nur eine Teilmenge
+        # der von Bambu Studio selbst gesendeten Felder. Recherche nach
+        # einem gemeldeten Problem ("Druck startet, haengt dann aber beim
+        # Materialladen - nur bei bestimmten Materialien wie ASA-CF, PLA
+        # unbetroffen") ergab per Vergleich mit mehreren unabhaengigen,
+        # dokumentierten Referenz-Payloads (Cinder's Blog "Bambu AMS
+        # Filament Mapping", als "funktioniert zuverlaessig" bestaetigt;
+        # OpenBambuAPI-Projekt, Doridian/OpenBambuAPI auf GitHub): es
+        # fehlten mehrere Felder, allen voran `bed_type` - ohne dieses
+        # Feld ist unklar, welchen Druckbett-Typ die Firmware annimmt,
+        # was insbesondere bei anspruchsvolleren Materialien (hohe
+        # Bett-/Duesentemperatur, wie ASA-CF) zu Problemen im weiteren
+        # Startablauf fuehren kann. Ergaenzt um den vollstaendigen,
+        # dokumentierten Feldsatz - alle zusaetzlichen Felder sind laut
+        # beiden Quellen fuer lokale (nicht Cloud-)Drucke unkritisch mit
+        # "0" bzw. "auto" zu befuellen.
+        job_name = os.path.splitext(os.path.splitext(remote_name)[0])[0] or remote_name
         payload = {
             "print": {
                 "sequence_id": "0",
                 "command": "project_file",
                 "param": "Metadata/plate_1.gcode",
                 "url": f"file:///sdcard/{remote_name}",
+                "bed_type": "auto",
+                "project_id": "0",
+                "profile_id": "0",
+                "task_id": "0",
                 "subtask_id": "0",
+                "subtask_name": job_name,
                 "use_ams": bool(ams_summary.get("use_ams")),
                 "timelapse": False,
                 "flow_cali": False,

@@ -1,4 +1,4 @@
-# Bambu Lab + Formlabs Drucker Dashboard
+# Bambu Lab Drucker Dashboard
 
 ![Bild](Unbenannt.PNG)
 
@@ -56,8 +56,8 @@ mit `APP_VERSION` in `app.py` uebereinstimmen, siehe Abschnitt "Versionierung"
 weiter unten), legt der Workflow automatisch einen GitHub Release mit
 **beiden** Zip-Paketen als Download an:
 ```bash
-git tag v1.5.5
-git push origin v1.5.5
+git tag v1.5.6
+git push origin v1.5.6
 ```
 
 Der Workflow braucht keine weiteren Geheimnisse/Secrets — `GITHUB_TOKEN`
@@ -463,7 +463,11 @@ Karten-Grid, das sich alle 2,5 Sekunden aktualisiert.
 - Technisch laeuft das in zwei Schritten ab: Upload per **FTPS (Port
   990, implizites TLS)** über Pythons eingebautes `ftplib`/`ssl`
   (`bblp` + Access Code als Login), danach ein **MQTT-Kommando
-  `project_file`** über die ohnehin bestehende Status-Verbindung.
+  `project_file`** über die ohnehin bestehende Status-Verbindung — mit
+  dem vollstaendigen, von mehreren unabhaengigen Quellen dokumentierten
+  Feldsatz (inkl. `bed_type`, `subtask_name`, `project_id`/`profile_id`/
+  `task_id`), siehe Abschnitt "Bekannter Fall: Druck bleibt beim
+  Materialladen haengen" weiter unten.
   Siehe Abschnitt "X1-Serie (X1C, X1E): bekanntes Problem behoben"
   weiter unten fuer Hintergrund zu einem inzwischen behobenen Sonderfall.
 - **Developer Mode muss aktiviert sein** (siehe Abschnitt 4) — sonst
@@ -505,6 +509,24 @@ Karten-Grid, das sich alle 2,5 Sekunden aktualisiert.
   nicht fuer OctoPrint/Creality/Formlabs/Ultimaker (die haben eigene,
   etablierte Wege fuer Druckauftraege, z. B. OctoPrint-Weboberflaeche
   oder Moonraker/Fluidd/Mainsail).
+- **Bekannter Fall: Druck bleibt beim Materialladen haengen (behoben
+  seit v1.5.6).** Datei-Upload und Druckstart liefen fehlerfrei, der
+  Drucker blieb aber ohne jede Fehlermeldung beim Laden des Materials
+  in den Extruder haengen — bei manchen Materialien (z. B. ASA-CF),
+  waehrend andere (z. B. PLA) problemlos funktionierten, obwohl die
+  AMS-Zuordnung in beiden Faellen korrekt war. **Ursache:** Das an den
+  Drucker gesendete MQTT-Kommando enthielt nur eine Teilmenge der
+  Felder, die Bambu Studio selbst beim Druckstart sendet — insbesondere
+  fehlte `bed_type` (Druckbett-Typ) komplett. Ohne dieses Feld ist
+  unklar, welchen Bett-Typ die Firmware fuer den weiteren Ablauf
+  annimmt, was bei anspruchsvolleren Materialien (hohe Bett-/
+  Duesentemperatur) zu einem Haengenbleiben im Startablauf fuehren
+  kann, waehrend unkritischere Materialien wie PLA davon meist
+  unberuehrt bleiben. **Fix:** Der gesendete Befehl enthaelt jetzt den
+  vollstaendigen, von mehreren unabhaengigen Community-Quellen
+  dokumentierten Feldsatz (`bed_type: "auto"`, `subtask_name`,
+  `project_id`/`profile_id`/`task_id`, jeweils wie fuer lokale Drucke
+  vorgesehen).
 - **X1-Serie (X1C, X1E): bekanntes Problem behoben (seit v1.5.4).**
   Auf diesen Modellen brach der Datei-Upload zuvor reproduzierbar mit
   `EOF occurred in violation of protocol` ab, waehrend dieselbe Funktion

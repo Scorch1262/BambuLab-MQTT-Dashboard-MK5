@@ -71,7 +71,7 @@ nötig, keine externen Template-/Static-Ordner).
 | Bekannte Druckertypen | `KNOWN_TYPES`, `FORMLABS_TYPES`, `CREALITY_TYPES` |
 | Default-Konfiguration | `DEFAULT_CONFIG = {` |
 | Verbindungsklassen | `class PrinterConnection`, `class FormlabsLocalApiConnection`, `class OctoPrintConnection`, `class CrealityConnection`, `class UltimakerConnection`, `class ExtrasMqttManager` |
-| Druckauftrag senden (Bambu) | `PrinterConnection.preview_print()`, `PrinterConnection.send_print()`, `PrinterConnection.pause_mqtt()`/`resume_mqtt()`/`wait_for_mqtt_reconnect()`, `class ImplicitFtpTls`, `_find_ftps_upload_helper()`, `ftps_upload_helper.py` (separate Datei/exe), `_run_ftps_upload_worker()` + Sentinel-Check `--ftps-upload-worker` (Fallback, ganz frueh im Modul), `DashboardApp.prepare_print_job()`/`start_confirm_print_job()`/`cancel_print_job()`/`get_print_progress()`, Routen `POST /api/printers/<id>/print/prepare`\|`/confirm`, `GET .../print/progress/<job_id>`, `POST .../print/cancel`, JS `renderDropZone()`/`dzDrop()`/`openAmsModal()`/`confirmAmsModal()`/`pollAmsProgress()` |
+| Druckauftrag senden (Bambu) | `PrinterConnection.preview_print()`, `PrinterConnection.send_print()`, `PrinterConnection._request_print()`, `PrinterConnection.pause_mqtt()`/`resume_mqtt()`/`wait_for_mqtt_reconnect()`, `class ImplicitFtpTls`, `_find_ftps_upload_helper()`, `ftps_upload_helper.py` (separate Datei/exe), `_run_ftps_upload_worker()` + Sentinel-Check `--ftps-upload-worker` (Fallback, ganz frueh im Modul), `DashboardApp.prepare_print_job()`/`start_confirm_print_job()`/`cancel_print_job()`/`get_print_progress()`, Routen `POST /api/printers/<id>/print/prepare`\|`/confirm`, `GET .../print/progress/<job_id>`, `POST .../print/cancel`, JS `renderDropZone()`/`dzDrop()`/`openAmsModal()`/`confirmAmsModal()`/`pollAmsProgress()` |
 | AMS-Zuordnungsvorschlag | `PrinterConnection.preview_print()`, `_parse_3mf_filaments()`, `_parse_plate1_used_filament_indices()`, `_find_matching_tray()`, `_types_compatible()`, `_slot_to_flat_index()` |
 | Versionsnummer | `APP_VERSION` (ganz oben in `app.py`), Route `GET /api/version`, `.github/workflows/build-exe.yml` (liest die Version per Regex aus) |
 | Orchestrierung | `class DashboardApp` |
@@ -770,6 +770,59 @@ daher meist, nur den Type-Tuple und die Frontend-Labels zu erweitern,
   anderen Materialpaar auftritt, zuerst `_types_compatible()` mit den
   konkreten Typ-Strings durchtesten, bevor eine neue Ursache vermutet
   wird.
+
+  **v1.5.6 - Folgefehler nach v1.5.5: AMS-Zuordnung war schon korrekt,
+  trotzdem Haengenbleiben beim Materialladen.** Der Nutzer meldete
+  zurueck: das ASA-CF-Fach wurde bereits in v1.5.4 korrekt vorgeschlagen
+  (der Drucker hatte tatsaechlich ASA-CF geladen) - die v1.5.5-Diagnose
+  (Verbundwerkstoff-Verwechslung) war also fuer DIESEN konkreten Fall
+  nicht die Ursache (der Fix selbst bleibt trotzdem sinnvoll fuer den
+  allgemeinen Fall). Wichtige Zusatzinfo vom Nutzer: keine
+  Fehlermeldung am Display, Material wurde schon mehrfach erfolgreich
+  gedruckt (kein grundsaetzliches Erstdruck-Problem). Da eine "falsche
+  AMS-Zuordnung mit RFID-Mismatch" typischerweise eine sichtbare
+  Bestaetigungs-Abfrage ausloest, aber KEINE Fehlermeldung auftrat,
+  wurde der Verdacht auf das MQTT-Kommando selbst gelenkt: ein
+  Vergleich des tatsaechlich gesendeten `project_file`-Befehls mit
+  mehreren unabhaengig dokumentierten, als "funktioniert zuverlaessig"
+  bestaetigten Referenz-Payloads (Cinder's Blog "Bambu AMS Filament
+  Mapping"; Doridian/OpenBambuAPI auf GitHub) zeigte: unser Befehl
+  enthielt nur eine Teilmenge der Felder, die Bambu Studio selbst
+  sendet. Insbesondere fehlte **`bed_type`** komplett - ohne dieses
+  Feld ist unklar, welchen Druckbett-Typ die Firmware fuer den
+  weiteren Startablauf annimmt, was bei anspruchsvolleren Materialien
+  (hoehere Bett-/Duesentemperatur, wie ASA-CF) eher zu Problemen fuehren
+  kann als bei unkritischeren Materialien wie PLA - was zur beobachteten
+  Materialabhaengigkeit passt. Ebenfalls fehlten `subtask_name`,
+  `project_id`, `profile_id`, `task_id` (laut OpenBambuAPI-Spezifikation
+  fuer lokale Drucke immer `"0"`, aber offenbar Teil des vollstaendigen,
+  von der Firmware erwarteten Befehlsformats).
+  **Implementierte Aenderung:** `_request_print()` sendet jetzt den
+  vollstaendigen, dokumentierten Feldsatz: `"bed_type": "auto"` (laesst
+  die Firmware selbst anhand der eingelegten Druckplatte entscheiden -
+  die sicherste Wahl, keine Annahme ueber die tatsaechlich verwendete
+  Platte), `"subtask_name"` (Auftragsname, aus dem Dateinamen ohne
+  `.gcode.3mf`-Endung abgeleitet - zusaetzlicher Vorteil: der Drucker
+  zeigt jetzt einen sinnvollen Namen statt eines leeren/generischen
+  Werts an), sowie `"project_id"`, `"profile_id"`, `"task_id"` (alle
+  `"0"`, wie fuer lokale/nicht-Cloud-Drucke dokumentiert).
+  **Getestet (ohne echten Drucker):** vollstaendige Payload-Struktur
+  gegen einen simulierten MQTT-Client verifiziert (alle neuen Felder
+  korrekt gesetzt, `ams_mapping`/`use_ams` weiterhin korrekt aus der
+  Nutzer-Zuordnung uebernommen); `subtask_name`-Extraktion fuer mehrere
+  Dateinamen-Varianten getestet (inkl. Namen mit mehreren Punkten);
+  vollstaendiger End-to-End-Test ueber `send_print()`. **Ein Test gegen
+  einen echten Drucker mit ASA-CF konnte in dieser Umgebung nicht
+  durchgefuehrt werden** - Bestaetigung durch den Nutzer stand zum
+  Zeitpunkt dieser Übergabe noch aus.
+  **Fuer die Weiterarbeit, falls der Fehler nach v1.5.6 weiterhin
+  auftritt:** Ein MQTT-Sniffer (z. B. MQTT Explorer, mosquitto_sub)
+  parallel zu Bambu Studio mitlaufen lassen und den *tatsaechlich* von
+  Bambu Studio gesendeten `project_file`-Befehl fuer denselben Druck
+  direkt mit unserem vergleichen (Byte-fuer-Byte-JSON-Diff) waere der
+  naechste, praeziseste Schritt - zuverlaessiger als weitere
+  Community-Referenz-Payloads zu vergleichen, da es den tatsaechlichen
+  Befehl DIESES Druckers/dieser Firmware-Version zeigt.
 - **Zweiter, unabhängiger MQTT-Broker** (`ExtrasMqttManager`) für frei
   definierbare Sensoren/Schalter, die einer Drucker-Karte angehängt
   werden. Aktivierung über `extras_mqtt` in `config.json`, Zuordnung über
@@ -901,27 +954,32 @@ daher meist, nur den Type-Tuple und die Frontend-Labels zu erweitern,
   der Praxis erfolgreich getestet** (mehrere PLA-Drucke auf X1C und
   X1E ohne Probleme) - dieses Kapitel gilt damit als abgeschlossen.
 - **AMS-Zuordnung bei Verbundwerkstoffen (PLA-CF, PETG-CF, ASA-CF, PA-CF,
-  ABS-GF usw.) - behoben in v1.5.5.** Nach dem geloesten FTPS-Problem
-  meldete der Nutzer ein neues, unabhaengiges Symptom: ASA-CF-Drucke
-  wurden korrekt uebertragen und gestartet, blieben aber beim
-  Materialladen haengen (PLA war nicht betroffen). Ursache: die
-  Typ-Pruefung in `_find_matching_tray()` nutzte einen reinen
-  Teilstring-Vergleich, der "ASA" faelschlich als Teilmenge von
-  "ASA-CF" akzeptierte (und analog fuer alle anderen Verbundwerkstoffe)
-  - bei uebereinstimmender Fach-Farbe konnte so ein Fach mit dem
-  falschen (unverstaerkten) Grundmaterial automatisch vorgeschlagen und
-  bei Uebernahme durch den Nutzer an den Drucker gesendet werden. Der
-  Drucker erkennt dann per RFID ein anderes Material als erwartet und
-  wartet vermutlich auf eine Bestaetigung am Display, was remote wie
-  ein Haengenbleiben wirkt. Fix: neue Funktion `_types_compatible()`
-  vergleicht Materialtyp-Suffixe (Teil nach "-") auf exakte
-  Uebereinstimmung, bevor der Basis-Name weiterhin locker verglichen
-  werden darf (siehe Abschnitt 5 fuer Details und Testabdeckung). Wie
-  bei FTPS: **noch keine Bestaetigung durch einen echten ASA-CF-Druck
-  nach dem Fix** - sollte das Problem trotzdem weiterhin auftreten,
-  zuerst pruefen, welches AMS-Fach im Dialog tatsaechlich vorausgewaehlt
-  war (Screenshot/Notiz vor dem Bestaetigen) und mit dem tatsaechlichen
-  Fachinhalt vergleichen.
+  ABS-GF usw.) - Fix in v1.5.5 ausgeliefert, war aber NICHT die Ursache
+  des konkret gemeldeten Falls (siehe naechster Punkt fuer die
+  tatsaechliche Ursache).** Urspruengliche Vermutung: die Typ-Pruefung
+  in `_find_matching_tray()` nutzte einen reinen Teilstring-Vergleich,
+  der "ASA" faelschlich als Teilmenge von "ASA-CF" akzeptierte. Der
+  Fix (`_types_compatible()`, siehe Abschnitt 5) ist weiterhin sinnvoll
+  und bleibt bestehen - der Nutzer bestaetigte aber, dass die AMS-
+  Zuordnung in seinem konkreten Fall schon VOR diesem Fix korrekt war
+  (ASA-CF wurde tatsaechlich vorgeschlagen und war im Drucker geladen).
+- **Druck haengt beim Materialladen (kein Fehlerdisplay) - Ursache
+  gefunden und behoben in v1.5.6, Bestaetigung durch Nutzer ausstehend.**
+  Nach Ausschluss der AMS-Zuordnung als Ursache (siehe oben) fiel beim
+  Vergleich mit dokumentierten Referenz-MQTT-Payloads auf: das
+  `project_file`-Kommando fehlte mehrere Felder, allen voran `bed_type`
+  - ohne dieses Feld ist unklar, welchen Druckbett-Typ die Firmware
+  annimmt, was bei anspruchsvolleren Materialien (ASA-CF: hohe
+  Bett-/Duesentemperatur) eher zu Problemen fuehrt als bei PLA. Fix:
+  vollstaendiger Feldsatz ergaenzt (`bed_type: "auto"`, `subtask_name`,
+  `project_id`/`profile_id`/`task_id`, siehe Abschnitt 5 fuer Details).
+  **Fuer die Weiterarbeit, falls das Problem nach v1.5.6 weiterhin
+  auftritt:** Ein MQTT-Sniffer (MQTT Explorer, mosquitto_sub) parallel
+  zu einem erfolgreichen Bambu-Studio-Druck auf demselben Drucker
+  mitlaufen lassen und den *tatsaechlich* gesendeten `project_file`-
+  Befehl direkt (Byte-fuer-Byte-JSON-Diff) mit unserem vergleichen -
+  das zeigt den fuer DIESE konkrete Firmware-Version tatsaechlich
+  erwarteten Befehl, zuverlaessiger als weitere Community-Referenzen.
   Separat, unabhaengig von diesem Thema: Auf dem A1 Mini hat die
   Datei-Uebertragung (mit Python-`ftplib`, v1.4.5) funktioniert, der
   Druck selbst startete aber nicht - laut Nutzer wahrscheinlich, weil
@@ -957,7 +1015,7 @@ Weiterarbeit: bei jeder ausgelieferten Änderung `APP_VERSION` in
 `app.py` erhöhen (semantisch: MAJOR.MINOR.PATCH — siehe README,
 Abschnitt 0a) und einen passenden Commit-Text mitliefern.**
 
-- Aktuelle Version: **v1.5.5** (v1.1.0: Drag-&-Drop-Druckfeature,
+- Aktuelle Version: **v1.5.6** (v1.1.0: Drag-&-Drop-Druckfeature,
   macOS-Build, Versionierung selbst. v1.2.0: AMS-Zuordnung als
   bestätigbarer Dialog statt Sofort-Druck. v1.3.0: Dialog zeigt nur noch
   die für den jeweiligen Druck tatsächlich benötigten Filamente
@@ -1060,14 +1118,20 @@ Abschnitt 0a) und einen passenden Commit-Text mitliefern.**
   jetzt Zeile für Zeile dem vom Nutzer verifizierten Referenzcode. **Vom
   Nutzer bestätigt: mehrere PLA-Drucke auf X1C und X1E ohne Probleme.**
   v1.5.5: neues, unabhängiges Problem gemeldet — ASA-CF-Drucke blieben
-  beim Materialladen hängen (PLA nicht betroffen). Ursache: zu lockere
-  Teilstring-Typprüfung in `_find_matching_tray()` akzeptierte "ASA" als
-  Teilmenge von "ASA-CF" (analog für alle Verbundwerkstoffe), konnte bei
-  Farbübereinstimmung ein Fach mit falschem Grundmaterial vorschlagen.
-  Fix: neue Funktion `_types_compatible()` vergleicht Materialtyp-
-  Suffixe [Teil nach "-"] auf exakte Übereinstimmung, bevor der
-  Basis-Name weiterhin locker verglichen werden darf. Bestätigung durch
-  Nutzer stand zum Zeitpunkt dieser Übergabe noch aus).
+  beim Materialladen hängen (PLA nicht betroffen). Ursache vermutet: zu
+  lockere Teilstring-Typprüfung in `_find_matching_tray()` akzeptierte
+  "ASA" als Teilmenge von "ASA-CF" (analog für alle Verbundwerkstoffe).
+  Fix: neue Funktion `_types_compatible()` — **bestätigte sich beim
+  Nutzer-Test als NICHT die Ursache dieses konkreten Falls** (Zuordnung
+  war schon vorher korrekt), Fix bleibt aber für den allgemeinen Fall
+  sinnvoll. v1.5.6: tatsächliche Ursache gefunden — das gesendete
+  `project_file`-MQTT-Kommando fehlte mehrere von Bambu Studio selbst
+  gesendete Felder, allen voran `bed_type`, was bei anspruchsvolleren
+  Materialien wie ASA-CF (hohe Bett-/Düsentemperatur) zu einem
+  Hängenbleiben beim Materialladen führen kann. Fix: vollständiger
+  Feldsatz ergänzt [`bed_type: "auto"`, `subtask_name`, `project_id`/
+  `profile_id`/`task_id`]. Bestätigung durch Nutzer stand zum Zeitpunkt
+  dieser Übergabe noch aus).
 - `APP_VERSION` ist die einzige Quelle der Wahrheit; der GitHub-Actions-
   Workflow liest sie automatisch per Regex aus `app.py` aus.
 - Empfohlener Ablauf beim Ausliefern einer neuen Version: `APP_VERSION`
