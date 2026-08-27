@@ -56,8 +56,8 @@ mit `APP_VERSION` in `app.py` uebereinstimmen, siehe Abschnitt "Versionierung"
 weiter unten), legt der Workflow automatisch einen GitHub Release mit
 **beiden** Zip-Paketen als Download an:
 ```bash
-git tag v1.5.6
-git push origin v1.5.6
+git tag v1.6.2
+git push origin v1.6.2
 ```
 
 Der Workflow braucht keine weiteren Geheimnisse/Secrets — `GITHUB_TOKEN`
@@ -399,8 +399,19 @@ Damit die Verbindung funktioniert, muss an jedem Bambu Lab Drucker der
 Ohne Name und IP allein kann keine Verbindung aufgebaut werden — Bambu Lab
 Drucker verlangen zusaetzlich den Access Code (Passwort fuer MQTT) und die
 Seriennummer (fuer das MQTT-Topic). Das Formular "Drucker hinzufuegen" im
-Dashboard fragt daher vier Felder ab: **Name, IP-Adresse, Access Code,
-Seriennummer**.
+Dashboard fragt daher fuenf Felder ab: **Name, IP-Adresse, Access Code,
+Seriennummer, Druckerfamilie**.
+
+**Druckerfamilie (seit v1.6.1):** Zusaetzlich zur Auswahl **X1-Serie
+(X1C, X1E)** oder **A1-Serie (A1, A1 Mini)**. Diese Auswahl bestimmt, mit
+welcher Verbindungseinstellung der Datei-Upload (Abschnitt 4a) beim
+allerersten Versuch arbeitet — beide Druckerfamilien brauchen
+unterschiedliche, teils gegensaetzliche Einstellungen (siehe Abschnitt
+4a fuer den technischen Hintergrund). **Eine falsche Auswahl verhindert
+den Druck nicht** — das Dashboard probiert bei einem Fehlschlag
+automatisch die jeweils andere Einstellung im zweiten Versuch — sie
+spart nur einen unnoetigen Fehlversuch beim allerersten Druck.
+Voreingestellt ist "X1-Serie".
 
 **Zusaetzlich fuer die Druckfunktion (Abschnitt 4a) noetig:** Der
 **"Developer Mode"** muss zusaetzlich zum LAN-Modus separat aktiviert
@@ -408,6 +419,16 @@ werden (Bambu Handy App → Drucker auswaehlen → Einstellungen →
 "Developer Mode"). Ohne Developer Mode lehnt die Firmware neuerer
 Drucker das Starten eines Druckauftrags per MQTT ab (reine Status-
 Anzeige funktioniert davon unabhaengig auch ohne Developer Mode).
+**Wichtig: das ist eine Pro-Geraet-Einstellung** — bei mehreren Bambu-
+Druckern muss der Developer Mode fuer JEDEN einzeln aktiviert werden,
+auch wenn der LAN-Modus bereits laeuft. Fehlt er, meldet der Drucker
+beim Druckstart typischerweise **"Die Ueberpruefung des MQTT-Befehls
+ist fehlgeschlagen"** (englisch: "MQTT command verification failed")
+— das ist keine Fehlfunktion des Dashboards, sondern ein direkter
+Hinweis der Bambu-Firmware auf den fehlenden Developer Mode fuer genau
+dieses Geraet (offiziell von Bambu so dokumentiert). Abhilfe: Developer
+Mode fuer den betroffenen Drucker in der Handy App aktivieren, danach
+den Druck erneut starten.
 
 ## 4a. Bambu Lab: Druckauftrag per Drag & Drop senden
 
@@ -527,40 +548,75 @@ Karten-Grid, das sich alle 2,5 Sekunden aktualisiert.
   dokumentierten Feldsatz (`bed_type: "auto"`, `subtask_name`,
   `project_id`/`profile_id`/`task_id`, jeweils wie fuer lokale Drucke
   vorgesehen).
-- **X1-Serie (X1C, X1E): bekanntes Problem behoben (seit v1.5.4).**
-  Auf diesen Modellen brach der Datei-Upload zuvor reproduzierbar mit
-  `EOF occurred in violation of protocol` ab, waehrend dieselbe Funktion
-  auf einem A1 Mini funktionierte. **Tatsaechliche Ursache:** Die
-  X1-Serie laeuft intern auf **vsftpd** mit aktivierter Option
-  `require_ssl_reuse` — die Datenverbindung (fuer den eigentlichen
-  Datei-Upload) muss dieselbe TLS-Sitzung wie die Kontrollverbindung
-  fortsetzen (ein Schutz gegen Session-Hijacking). Pythons eingebautes
-  `ftplib`-Modul stellt diese Sitzungs-Wiederverwendung fuer die
-  Datenverbindung **nicht automatisch her** (eine fruehere Annahme des
-  Gegenteils war schlicht falsch — durch direkte Pruefung des Python-
-  Quellcodes widerlegt). Ohne das explizite Nachruesten dieser Sitzungs-
-  Wiederverwendung lehnt die X1-Firmware die Datenverbindung nach
-  einigen zehntausend Bytes ab. Das erklaert auch, warum FileZilla immer
-  funktionierte (es macht das automatisch richtig) und warum die
-  A1-Serie nicht betroffen war (leichterer FTPS-Server ohne diese
-  strikte vsftpd-Pruefung). Bestaetigt durch einen direkten Vergleichs-
-  test: ein eigenstaendiges Diagnose-Tool mit expliziter Sitzungs-
-  Wiederverwendung uebertrug zuverlaessig, waehrend dieselbe Logik ohne
-  dieses eine Detail reproduzierbar bei ca. 11% abbrach — selbst als
-  komplett eigenstaendiges, unabhaengig gestartetes Programm (siehe
-  UEBERGABE.md fuer die volle Chronologie inkl. dreier zwischenzeitlicher
-  Fehldiagnosen, die sich alle als nicht ursaechlich herausstellten).
-  **Fix (v1.5.4):** `ImplicitFtpTls` in `app.py` und
-  `ftps_upload_helper.py` uebergibt beim Aufbau der Datenverbindung
-  jetzt explizit `session=self.sock.session`, um die TLS-Sitzung der
-  Kontrollverbindung korrekt wiederzuverwenden.
+- **Bekannter Fall: Mehrfarb-/Mehrmaterial-Druck (behoben seit v1.6.2,
+  zwei zusammenhaengende Ursachen).** Bei Drucken mit mehreren
+  Filamenten (z. B. 2-3 Farben) traten zwei getrennte Probleme auf,
+  beide ausschliesslich beim Start ueber das Dashboard (derselbe
+  Druckauftrag lief bei manuellem Start am Display problemlos an — das
+  Problem lag also eindeutig am gesendeten MQTT-Kommando, nicht an der
+  Datei oder der AMS-Konfiguration):
+  1. **Der Drucker begann nicht mit dem Aufheizen des Druckbetts**
+     (behoben seit v1.5.10): Das Feld `flow_cali` (Fluss-Kalibrierung)
+     war fest auf `false` gesetzt, waehrend die etablierte Referenz-
+     bibliothek "bambulabs_api" hierfuer standardmaessig `true`
+     verwendet — Mehrfarb-Drucke benoetigen beim Farbwechsel zwingend
+     Spuelvorgaenge, fuer die offenbar Kalibrierungsdaten vorhanden sein
+     muessen. Fix: `flow_cali` wird jetzt auf `true` gesetzt.
+  2. **"Die Zuordnungstabelle des AMS konnte nicht abgerufen werden"**
+     ("Failed to get AMS mapping table", behoben seit v1.6.2): ein
+     Indexierungsfehler bei der AMS-Zuordnung. Enthaelt eine `.gcode.3mf`
+     mehr Filamente im Projekt, als auf der gedruckten Platte tatsaechlich
+     verwendet werden (z. B. Projekt hat 4 Filamente, Platte 1 nutzt aber
+     nur Filament 2 und 4), wurde bisher ein "luecken-freies", kompaktes
+     Zuordnungs-Array gesendet (Position 0 und 1 fuer die zwei
+     angezeigten Filamente) statt eines Arrays, dessen Positionen den
+     ECHTEN Filament-Nummern aus der Datei entsprechen (Position 1 und
+     3, mit `-1` an den ungenutzten Stellen 0 und 2) — was der Drucker
+     als ungueltige Zuordnungstabelle abgelehnt hat. Bei Einzelfarb-
+     Drucken (nur ein Filament, meist mit der Nummer 0) fiel das nie
+     auf, da dort kompaktes und echtes Array zufaellig identisch sind.
+     Fix: Backend und Weboberflaeche verwenden jetzt durchgaengig die
+     echte Filament-Nummer aus der Datei fuer die Position im
+     Zuordnungs-Array, mit korrekter Gesamtlaenge.
+- **X1-Serie (X1C, X1E) + A1 Mini: FTPS-Upload zuverlaessig fuer beide
+  Familien (seit v1.6.0). Seit v1.6.1 wird direkt das richtige
+  Verbindungsprofil verwendet**, basierend auf der beim Hinzufuegen des
+  Druckers gewaehlten Druckerfamilie (siehe Abschnitt 4) — dadurch klappt
+  der Upload jetzt bereits beim allerersten Versuch, statt sich erst
+  durch Alternieren die richtige Einstellung "erarbeiten" zu muessen.
+  Die X1-Serie laeuft intern auf **vsftpd**
+  mit aktivierter Option `require_ssl_reuse` — die Datenverbindung muss
+  dieselbe TLS-Sitzung wie die Kontrollverbindung fortsetzen (ein
+  Schutz gegen Session-Hijacking) UND profitiert von einer Begrenzung
+  auf TLS 1.2; ohne das bricht die Datenverbindung nach einigen
+  zehntausend Bytes ab. Fuer die X1-Serie gibt es dafuer ein eigenes
+  Verbindungsprofil ("x1", siehe Abschnitt 5 fuer Details).
+  Der **A1 Mini** brach unabhaengig von TLS-Version, Sitzungs-
+  Wiederverwendung und Zeitlimit reproduzierbar mit `The read
+  operation timed out` ab — und zwar erst NACHDEM die Datei bereits
+  **vollstaendig (100%)** uebertragen war. Ein erneuter Vergleichstest
+  ergab: eine Uebertragung derselben Datei per **Bambu Studio** schloss
+  bereits **1-2 Sekunden nach Erreichen von 100%** erfolgreich ab — der
+  Drucker antwortet also gar nicht langsam, wie zuvor angenommen.
+  **Tatsaechliche Ursache:** Pythons `ftplib` ruft nach jeder Datei-
+  uebertragung automatisch einen formalen TLS-Verbindungsabschluss
+  (`unwrap()`) der Datenverbindung auf, bei dem auf eine TLS-
+  Bestaetigung vom Server gewartet wird. Der A1 Mini scheint zwar die
+  eigentliche Abschluss-Antwort ("226 Transfer complete") prompt zu
+  senden, aber nicht sauber auf diesen formalen TLS-Abschluss zu
+  reagieren — waehrend Bambu Studio vermutlich gar keinen solchen
+  formalen Abschluss abwartet, sondern die Verbindung nach der
+  Uebertragung einfach schliesst.
+  **Fix (v1.6.0):** Fuer den A1 Mini wird der formale TLS-Abschluss der
+  Datenverbindung jetzt uebersprungen (eigene Upload-Funktion ohne
+  `unwrap()`-Aufruf) — dieselbe Technik, die schon fuer ein aehnliches
+  Problem bei der X1-Serie in Betracht gezogen (dort aber verworfen)
+  wurde, hier aber genau zum tatsaechlichen A1-Mini-Verhalten passt.
   **Die separate Hilfsanwendung `FtpsUploadHelper.exe`** (seit v1.5.3,
-  siehe Abschnitt 0/3) bleibt bestehen — sie war zwar nicht die
-  Ursache dieses Problems, ist aber weiterhin sinnvoll (siehe
-  UEBERGABE.md fuer Details).
+  siehe Abschnitt 0/3) bleibt weiterhin bestehen und notwendig.
   **Betroffen war ausschliesslich der Drag & Drop-Datei-Upload** —
-  Status, Kamera und AMS-Anzeige liefen auf der X1-Serie schon vorher
-  einwandfrei, da diese ueber MQTT laufen, nicht ueber FTPS.
+  Status, Kamera und AMS-Anzeige liefen bei beiden Druckerfamilien schon
+  vorher einwandfrei, da diese ueber MQTT laufen, nicht ueber FTPS.
 
 ## 5. Funktionsumfang
 

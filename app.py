@@ -36,7 +36,7 @@ Konfiguration:         config.json (liegt im selben Ordner wie das Skript
 # Release-Tag und Datei-Namen zu erzeugen. Bei jeder ausgelieferten
 # Aenderung hier erhoehen (siehe Abschnitt in UEBERGABE.md fuer die
 # Regeln, was Major/Minor/Patch bedeutet).
-APP_VERSION = "1.5.6"
+APP_VERSION = "1.6.2"
 
 import os
 import sys
@@ -128,6 +128,8 @@ def load_config() -> dict:
     cfg.setdefault("printers", [])
     for p in cfg["printers"]:
         p.setdefault("extras", [])
+        if p.get("type") == "bambu":
+            p.setdefault("bambu_family", "x1")
     return cfg
 
 
@@ -353,8 +355,24 @@ class PrinterConnection:
         """Liest Filament-Infos aus der .gcode.3mf und schlaegt eine
         AMS-Zuordnung anhand der aktuell bekannten AMS-Faecher vor. Wirft
         keine Exception bei nicht auswertbarer Datei - liefert dann leere
-        Listen, das Frontend zeigt dann "keine AMS-Zuordnung moeglich"."""
-        filaments = _parse_3mf_filaments(local_path)
+        Listen, das Frontend zeigt dann "keine AMS-Zuordnung moeglich".
+
+        WICHTIG (v1.6.2 - Bugfix "Zuordnungstabelle des AMS konnte nicht
+        abgerufen werden" bei Mehrfarb-Drucken): Jedes zurueckgegebene
+        Filament behaelt sein ORIGINALES 0-basiertes "index"-Feld aus
+        der .3mf (siehe _parse_3mf_filaments()), NICHT die Position in
+        dieser (ggf. gefilterten) Liste - das Frontend MUSS dieses Feld
+        beim Zusammenbauen des finalen "ams_mapping"-Arrays als Position
+        verwenden. "total_filaments" wird zusaetzlich zurueckgegeben,
+        damit das Frontend ein VOLLSTAENDIG GROSSES Array bauen kann
+        (mit -1 an allen nicht benoetigten Positionen) - der Drucker
+        erwartet offenbar ein Array, dessen Positionen den originalen
+        Projekt-Filament-IDs entsprechen, nicht ein kompaktes Array nur
+        der auf dieser Platte benoetigten Filamente. Wurde das kompakte
+        Array (Position = Index in der gefilterten Liste) gesendet,
+        quittierte der Drucker das bei Mehrfarb-Drucken mit "Failed to
+        get AMS mapping table" - siehe UEBERGABE.md fuer Details."""
+        filaments, total_filaments = _parse_3mf_filaments(local_path)
         ams_trays_raw = list(self.status.get("ams") or [])
         ams_trays = [{
             "flat_index": _slot_to_flat_index(t.get("slot")),
@@ -381,6 +399,7 @@ class PrinterConnection:
                 for i, f in enumerate(filaments)
             ],
             "ams_trays": ams_trays,
+            "total_filaments": total_filaments,
         }
 
     def send_print(self, local_path: str, remote_name: str, mapping, on_progress=None):
@@ -427,13 +446,41 @@ class PrinterConnection:
         # gemeinsam gezeigt, nicht nur der letzte - das war entscheidend
         # fuer die Diagnose in v1.4.1-v1.4.3 (siehe UEBERGABE.md,
         # Chronologie) und bleibt aus Diagnosegruenden bestehen.
+        #
+        # WICHTIG (v1.5.8): Ein isolierter Test von nur `reuse_session`
+        # (v1.5.7) hat gezeigt, dass der A1-Mini-Timeout nach 100%
+        # uebertragener Bytes UNABHAENGIG davon auftritt (mit UND ohne
+        # Sitzungs-Wiederverwendung identisch) - die Ursache lag also
+        # nicht (nur) dort. Vergleich mit der zuletzt beim A1 Mini
+        # bestaetigt funktionierenden Version (v1.4.5) zeigte: dort war
+        # zusaetzlich KEIN TLS-Versions-Deckel aktiv. Deshalb jetzt zwei
+        # vollstaendige Profile ("x1"/"a1", siehe FTPS_PROFILES) statt
+        # eines einzelnen Schalters - werden zwischen den 3 Versuchen
+        # alterniert, damit innerhalb der 3 Versuche garantiert die
+        # fuer das jeweilige Druckermodell passende Kombination
+        # gefunden wird, unabhaengig davon, welches Modell tatsaechlich
+        # am anderen Ende haengt.
+        # WICHTIG (v1.6.1): Die Reihenfolge richtet sich jetzt nach der
+        # beim Anlegen des Druckers gewaehlten Druckerfamilie
+        # (`self.cfg["bambu_family"]`, "x1" oder "a1") - das bekannte
+        # Modell wird beim ERSTEN Versuch probiert (kein unnoetiger
+        # Fehlversuch mehr, wenn das Modell bereits bekannt ist), das
+        # jeweils andere Profil bleibt als automatischer Fallback fuer
+        # Versuch 2 erhalten (z. B. falls die Familie falsch gewaehlt
+        # wurde oder sich das Druckermodell geaendert hat), Versuch 3
+        # wiederholt das urspruenglich bekannte Profil sicherheitshalber.
+        known_family = self.cfg.get("bambu_family", "x1")
+        other_family = "a1" if known_family == "x1" else "x1"
+        profile_pattern = [known_family, other_family, known_family]
         attempts = []
         for attempt in range(1, 4):
+            profile_name = profile_pattern[attempt - 1]
+            label = f"Profil {profile_name}"
             try:
-                self._ftps_upload_once(local_path, remote_name, on_progress=on_progress)
+                self._ftps_upload_once(local_path, remote_name, on_progress=on_progress, profile_name=profile_name)
                 return
             except (OSError, RuntimeError, subprocess.SubprocessError) as e:
-                attempts.append(f"Versuch {attempt}: {e}")
+                attempts.append(f"Versuch {attempt} ({label}): {e}")
                 if attempt < 3:
                     time.sleep(1.5 * attempt)
         attempts_text = "\n".join(attempts)
@@ -446,7 +493,7 @@ class PrinterConnection:
             f"und ob am Display selbst ein Fehler angezeigt wird."
         )
 
-    def _ftps_upload_once(self, local_path: str, remote_name: str, on_progress=None):
+    def _ftps_upload_once(self, local_path: str, remote_name: str, on_progress=None, profile_name: str = "x1"):
         # ------------------------------------------------------------
         # WICHTIG (v1.5.3) - Der Upload laeuft ueber eine SEPARATE,
         # eigenstaendig mitgelieferte Helfer-exe (FtpsUploadHelper),
@@ -477,17 +524,24 @@ class PrinterConnection:
         # (_run_ftps_upload_worker() weiter unten) bleibt als Fallback
         # bestehen, falls die Helfer-exe (noch) nicht gefunden wird
         # (z. B. im Entwicklungsbetrieb ohne vorherigen Build).
+        #
+        # WICHTIG (v1.5.8): `profile_name` ("x1"/"a1", siehe
+        # FTPS_PROFILES) wird als 5. Kommandozeilen-Argument an die
+        # Helfer-exe bzw. den Selbstaufruf-Fallback durchgereicht -
+        # siehe _ftps_upload() fuer die Begruendung (X1-Serie braucht
+        # TLS-1.2-Deckel + Sitzungs-Wiederverwendung, A1 Mini braucht
+        # freie TLS-Aushandlung ohne Sitzungs-Wiederverwendung).
         # ------------------------------------------------------------
         helper_path = _find_ftps_upload_helper()
         if helper_path:
-            cmd = [helper_path, self.cfg["ip"], self.cfg["access_code"], local_path, remote_name]
+            cmd = [helper_path, self.cfg["ip"], self.cfg["access_code"], local_path, remote_name, profile_name]
         else:
             exe = sys.executable
             if getattr(sys, "frozen", False):
-                cmd = [exe, "--ftps-upload-worker", self.cfg["ip"], self.cfg["access_code"], local_path, remote_name]
+                cmd = [exe, "--ftps-upload-worker", self.cfg["ip"], self.cfg["access_code"], local_path, remote_name, profile_name]
             else:
                 cmd = [exe, os.path.abspath(__file__), "--ftps-upload-worker",
-                       self.cfg["ip"], self.cfg["access_code"], local_path, remote_name]
+                       self.cfg["ip"], self.cfg["access_code"], local_path, remote_name, profile_name]
 
         total_size = os.path.getsize(local_path)
         proc = subprocess.Popen(
@@ -583,7 +637,20 @@ class PrinterConnection:
                 "subtask_name": job_name,
                 "use_ams": bool(ams_summary.get("use_ams")),
                 "timelapse": False,
-                "flow_cali": False,
+                # WICHTIG (v1.6.0): Bisher fest auf False, obwohl die
+                # etablierte Referenzbibliothek "bambulabs_api" hierfuer
+                # den Standardwert True verwendet
+                # (PrinterMQTTClient.start_print_3mf(..., flow_calibration:
+                # bool = True), siehe bambutools.github.io/bambulabs_api).
+                # Ein gemeldetes Problem ("Mehrfarbdruck bleibt vor dem
+                # Aufheizen haengen, Einzelfarb-Drucke funktionieren")
+                # passt zu einer fehlenden Fluss-Kalibrierung: Mehrfarb-
+                # Drucke brauchen zwingend Spuelvorgaenge beim Farbwechsel,
+                # die ohne Kalibrierungsdaten offenbar zu einem Haengen-
+                # bleiben schon vor dem eigentlichen Druckstart fuehren
+                # koennen. Auf True umgestellt, um dem bestaetigten
+                # Referenzverhalten zu entsprechen.
+                "flow_cali": True,
                 "bed_leveling": True,
                 "layer_inspect": True,
                 "vibration_cali": True,
@@ -617,18 +684,26 @@ def _parse_3mf_filaments(local_path: str):
     vorhanden/auswertbar oder liefert keine Treffer fuer Plate 1, wird
     NICHT geraten, sondern auf die vollstaendige Filamentliste aus
     project_settings.config zurueckgefallen (sicherer, nur etwas
-    weniger praezise als die Plate-gefilterte Liste)."""
+    weniger praezise als die Plate-gefilterte Liste).
+
+    Gibt ein Tupel (filamente, gesamtanzahl) zurueck. WICHTIG (v1.6.2 -
+    Bugfix): jedes Filament behaelt sein ORIGINALES 0-basiertes
+    "index"-Feld aus project_settings.config, auch nach dem Filtern -
+    dieser Wert MUSS als Position im finalen "ams_mapping"-Array an den
+    Drucker verwendet werden (nicht die Position in der gefilterten
+    Liste!), siehe ausfuehrliche Begruendung bei
+    PrinterConnection.preview_print()."""
     try:
         with zipfile.ZipFile(local_path) as zf:
             with zf.open("Metadata/project_settings.config") as f:
                 cfg = json.load(f)
     except Exception:
-        return []
+        return [], 0
 
     colours = cfg.get("filament_colour")
     types = cfg.get("filament_type")
     if not isinstance(colours, list) or not colours:
-        return []
+        return [], 0
     if not isinstance(types, list):
         types = []
 
@@ -640,13 +715,14 @@ def _parse_3mf_filaments(local_path: str):
             "color": _normalize_hex(colour),
             "type": (ftype or "").strip().upper(),
         })
+    total_count = len(all_filaments)
 
     used_indices = _parse_plate1_used_filament_indices(local_path)
     if used_indices:
         filtered = [f for f in all_filaments if f["index"] in used_indices]
         if filtered:
-            return filtered
-    return all_filaments
+            return filtered, total_count
+    return all_filaments, total_count
 
 
 def _parse_plate1_used_filament_indices(local_path: str):
@@ -774,18 +850,17 @@ def _run_ftps_upload_worker(argv):
     PrinterConnection._ftps_upload_once() im Hauptprozess ueber
     subprocess.Popen() - siehe dortiger Kommentar fuer die Begruendung
     (Ressourcen-/Scheduling-Konkurrenz mit dem MQTT-Thread im
-    Hauptprozess, wenn der Upload dort als Thread liefe)."""
-    if len(argv) != 4:
+    Hauptprozess, wenn der Upload dort als Thread liefe). Nur der
+    Fallback-Pfad, falls die separate FtpsUploadHelper-exe nicht
+    gefunden wird - siehe _find_ftps_upload_helper()."""
+    if len(argv) not in (4, 5):
         print(json.dumps({"type": "error", "message": "Falsche Anzahl Argumente fuer --ftps-upload-worker"}))
         return
-    ip, access_code, local_path, remote_name = argv
+    ip, access_code, local_path, remote_name = argv[:4]
+    profile_name = argv[4] if len(argv) >= 5 and argv[4] in FTPS_PROFILES else "x1"
+    profile = FTPS_PROFILES[profile_name]
 
-    ctx = ssl._create_unverified_context()
-    ctx.options |= getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
-    try:
-        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
-    except (AttributeError, ValueError):
-        pass
+    ctx = _build_ftps_context(profile)
 
     try:
         total_size = os.path.getsize(local_path)
@@ -805,13 +880,20 @@ def _run_ftps_upload_worker(argv):
             print(json.dumps({"type": "progress", "sent": sent, "total": total_size}), flush=True)
 
     try:
-        ftp = ImplicitFtpTls(context=ctx)
-        ftp.connect(ip, 990, timeout=25)
+        ftp = ImplicitFtpTls(context=ctx, reuse_session=profile["reuse_session"])
+        # WICHTIG (v1.5.9): Timeout erhoeht (25s -> 120s) - siehe
+        # ausfuehrliche Begruendung im identischen Kommentar in
+        # ftps_upload_helper.py (dort die primaer verwendete
+        # Implementierung; dieser Pfad ist nur der Fallback).
+        ftp.connect(ip, 990, timeout=120)
         ftp.login("bblp", access_code)
         ftp.prot_p()
         ftp.set_pasv(True)
         with open(local_path, "rb") as f:
-            ftp.storbinary(f"STOR {remote_name}", f, blocksize=8192, callback=_progress_cb)
+            if profile["skip_unwrap"]:
+                _storbinary_no_unwrap(ftp, f"STOR {remote_name}", f, blocksize=8192, callback=_progress_cb)
+            else:
+                ftp.storbinary(f"STOR {remote_name}", f, blocksize=8192, callback=_progress_cb)
         try:
             ftp.quit()
         except Exception:
@@ -831,33 +913,30 @@ class ImplicitFtpTls(ftplib.FTP_TLS):
     Subklasse wrappt den Socket direkt beim Verbindungsaufbau - dafuer
     zwingend noetig.
 
-    WICHTIG (v1.5.4 - KORREKTUR eines eigenen Fehlers): Vorherige
-    Versionen (ab v1.4.5) verzichteten hier bewusst auf ein
-    `ntransfercmd()`-Override, in der irrigen Annahme, Pythons
-    eingebautes `ftplib.FTP_TLS.ntransfercmd()` wuerde die TLS-Sitzung
-    der Kontrollverbindung bereits automatisch fuer die Datenverbindung
-    wiederverwenden (`session=self.sock.session`). **Das stimmt nicht -**
-    per `inspect.getsource(ftplib.FTP_TLS.ntransfercmd)` direkt
-    ueberprueft (Python 3.11/3.12): die eingebaute Methode uebergibt nur
-    `server_hostname=self.host`, OHNE `session=...`. Es findet also
-    OHNE dieses Override GAR KEINE TLS-Session-Wiederverwendung fuer die
-    Datenverbindung statt.
-    Das ist bedeutsam, weil die X1-Serie (X1C/X1E) intern auf vsftpd mit
-    `require_ssl_reuse` laeuft (siehe UEBERGABE.md, v1.5.0-Recherche) -
-    diese urspruengliche Diagnose war korrekt, wurde aber in v1.5.0
-    falsch umgesetzt/getestet (No-Unwrap OHNE Session-Reuse, siehe
-    UEBERGABE.md) und deshalb faelschlich als widerlegt verworfen. Der
-    entscheidende Beleg kam erst durch einen direkten Vergleich mit dem
-    Diagnose-Testskript des Nutzers, dessen "Test A" GENAU dieses
-    Override (session=self.sock.session) enthielt und zuverlaessig
-    funktionierte, waehrend diese Klasse ohne das Override reproduzierbar
-    bei ca. 11% abbrach. Das Override wird deshalb wieder ergaenzt -
-    diesmal ueberprueft gegen den tatsaechlichen Python-Quellcode statt
-    gegen eine ungeprüfte Annahme."""
+    WICHTIG (v1.5.8 - Profile statt Einzelschalter): Die X1-Serie
+    (X1C/X1E, bestaetigt funktionsfaehig) und der A1 Mini (bestaetigt
+    NICHT funktionsfaehig mit den bisherigen Einstellungen) brauchen
+    unterschiedliche TLS-Konfigurationen. Ein isolierter Test von nur
+    `reuse_session` (v1.5.7) hat gezeigt: Der A1-Mini-Timeout nach 100%
+    uebertragener Bytes tritt UNABHAENGIG von `reuse_session` auf (mit
+    UND ohne identisch) - die eigentliche Ursache lag also woanders.
+    Beim Vergleich mit der zuletzt beim Nutzer bestaetigt funktionierenden
+    Version (v1.4.5) fiel auf: dort war KEIN TLS-Versions-Deckel aktiv
+    (`ctx.maximum_version` wurde erst spaeter, in v1.5.0 fuer die
+    X1-Serie, wieder eingefuehrt) - TLS durfte sich frei aushandeln
+    (typischerweise TLS 1.3). Deshalb jetzt zwei vollstaendige,
+    benannte Profile statt einzelner Schalter (siehe `PROFILES` und
+    `_ftps_upload()` fuer die Alternierung ueber die 3 Upload-Versuche):
+      - "x1": TLS gedeckelt auf Version 1.2 + Sitzungs-Wiederverwendung
+        fuer die Datenverbindung (X1-Serie/vsftpd braucht beides)
+      - "a1": KEIN TLS-Versions-Deckel (freie Aushandlung) + KEINE
+        Sitzungs-Wiederverwendung (entspricht dem zuletzt beim A1 Mini
+        bestaetigt funktionierenden Verhalten aus v1.4.5)"""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, reuse_session: bool = True, **kwargs):
         super().__init__(*args, **kwargs)
         self._sock = None
+        self._reuse_session = reuse_session
 
     @property
     def sock(self):
@@ -870,18 +949,57 @@ class ImplicitFtpTls(ftplib.FTP_TLS):
         self._sock = value
 
     def ntransfercmd(self, cmd, rest=None):
-        # Siehe Klassen-Docstring: Pythons Standardverhalten wrappt die
-        # Datenverbindung OHNE die TLS-Sitzung der Kontrollverbindung
-        # wiederzuverwenden. Fuer FTPS-Server, die (wie vsftpd mit
-        # `require_ssl_reuse`, was die X1-Serie nachweislich einsetzt)
-        # eine gemeinsame Sitzung zwischen Kontroll- und Datenverbindung
-        # verlangen, muss das explizit ergaenzt werden.
         conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
         if self._prot_p:
-            conn = self.context.wrap_socket(
-                conn, server_hostname=self.host, session=self.sock.session
-            )
+            if self._reuse_session:
+                conn = self.context.wrap_socket(
+                    conn, server_hostname=self.host, session=self.sock.session
+                )
+            else:
+                conn = self.context.wrap_socket(conn, server_hostname=self.host)
         return conn, size
+
+
+# Vollstaendige, benannte Verbindungsprofile fuer den FTPS-Upload -
+# siehe Klassen-Docstring von ImplicitFtpTls oben fuer die Begruendung.
+# Werden sowohl vom Sentinel-Fallback (_run_ftps_upload_worker()) als
+# auch als Referenz fuer die an die separate Helfer-exe uebergebenen
+# Profilnamen genutzt (siehe _ftps_upload()/_ftps_upload_once()).
+# WICHTIG (v1.6.0): "a1" bekommt zusaetzlich "skip_unwrap": True - siehe
+# ausfuehrliche Begruendung im identischen Kommentar in
+# ftps_upload_helper.py (dort die primaer verwendete Implementierung).
+FTPS_PROFILES = {
+    "x1": {"cap_tls12": True, "reuse_session": True, "skip_unwrap": False},
+    "a1": {"cap_tls12": False, "reuse_session": False, "skip_unwrap": True},
+}
+
+
+def _build_ftps_context(profile: dict):
+    ctx = ssl._create_unverified_context()
+    ctx.options |= getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
+    if profile["cap_tls12"]:
+        try:
+            ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        except (AttributeError, ValueError):
+            pass
+    return ctx
+
+
+def _storbinary_no_unwrap(ftp, cmd, fp, blocksize=8192, callback=None):
+    """Wie ftplib.FTP.storbinary(), aber bewusst OHNE den abschliessenden
+    Aufruf von conn.unwrap() bei TLS-Datenverbindungen - siehe
+    ausfuehrliche Begruendung beim FTPS_PROFILES-Dict oben."""
+    ftp.voidcmd("TYPE I")
+    with ftp.transfercmd(cmd) as conn:
+        while True:
+            buf = fp.read(blocksize)
+            if not buf:
+                break
+            conn.sendall(buf)
+            if callback:
+                callback(buf)
+        # WICHTIG: bewusst KEIN conn.unwrap() hier.
+    return ftp.voidresp()
 
 
 # ----------------------------------------------------------------------
@@ -1629,7 +1747,8 @@ class DashboardApp:
 
     def add_printer(self, name, ip, ptype="bambu", access_code=None, serial=None,
                      camera_port=6000, mqtt_port=8883,
-                     api_key=None, port=None, https=False, webcam_url=None):
+                     api_key=None, port=None, https=False, webcam_url=None,
+                     bambu_family="x1"):
         new_printer = {
             "id": uuid.uuid4().hex[:10],
             "name": name,
@@ -1662,7 +1781,11 @@ class DashboardApp:
                 "access_code": access_code,
                 "serial": serial,
                 "mqtt_port": mqtt_port,
-                "camera_port": camera_port
+                "camera_port": camera_port,
+                # "x1" (X1C/X1E) oder "a1" (A1/A1 Mini) - steuert, welches
+                # FTPS-Verbindungsprofil beim ersten Upload-Versuch
+                # genutzt wird (siehe FTPS_PROFILES/_ftps_upload()).
+                "bambu_family": bambu_family if bambu_family in ("x1", "a1") else "x1",
             })
 
         self.cfg["printers"].append(new_printer)
@@ -1921,7 +2044,19 @@ def api_add_printer():
         serial = (data.get("serial") or "").strip()
         if not access_code or not serial:
             return jsonify({"error": "Fuer Bambu Lab Drucker sind Access Code und Seriennummer Pflichtfelder."}), 400
-        printer = dash.add_printer(name, ip, ptype="bambu", access_code=access_code, serial=serial)
+        # WICHTIG (v1.6.1): Druckerfamilie ("x1"/"a1") bestimmt, welches
+        # FTPS-Verbindungsprofil beim allerersten Upload-Versuch benutzt
+        # wird (siehe PrinterConnection._ftps_upload() und
+        # FTPS_PROFILES) - vermeidet unnoetige Fehlversuche, wenn das
+        # Druckermodell bereits bekannt ist. "x1" bleibt der Standard
+        # (Ruestet auch bestehende Konfigurationen ohne dieses Feld ab -
+        # siehe load_config()), da die X1-Serie zuerst zuverlaessig
+        # geloest wurde und mehr Nutzer betreffen duerfte.
+        bambu_family = (data.get("bambu_family") or "x1").strip().lower()
+        if bambu_family not in ("x1", "a1"):
+            bambu_family = "x1"
+        printer = dash.add_printer(name, ip, ptype="bambu", access_code=access_code,
+                                    serial=serial, bambu_family=bambu_family)
 
     return jsonify(printer), 201
 
@@ -1986,6 +2121,7 @@ def api_print_prepare(printer_id):
         "filename": filename,
         "filaments": preview["filaments"],
         "ams_trays": preview["ams_trays"],
+        "total_filaments": preview.get("total_filaments", len(preview["filaments"])),
     })
 
 
@@ -2369,6 +2505,19 @@ INDEX_HTML = r"""
       <input id="f_code" placeholder="8-stelliger Code">
       <label>Seriennummer</label>
       <input id="f_serial" placeholder="z. B. 01P00A123456789">
+      <label>Druckerfamilie</label>
+      <select id="f_bambu_family">
+        <option value="x1">X1-Serie (X1C, X1E)</option>
+        <option value="a1">A1-Serie (A1, A1 Mini)</option>
+      </select>
+      <div class="hint-text">
+        Bestimmt, welche Verbindungseinstellung fuer den Datei-Upload
+        beim ersten Versuch benutzt wird (X1- und A1-Serie brauchen
+        unterschiedliche, teils gegensaetzliche Einstellungen). Bei
+        falscher Wahl wird automatisch die jeweils andere Einstellung
+        im zweiten Versuch ausprobiert - der Druck funktioniert also so
+        oder so, eine korrekte Auswahl spart nur einen Fehlversuch.
+      </div>
     </div>
 
     <div id="formlabsHint" class="hint-text">
@@ -2482,6 +2631,7 @@ function openAddModal(){
    'f_creality_apikey','f_creality_port','f_creality_webcam',
    'f_ultimaker_port','f_ultimaker_webcam'].forEach(id => document.getElementById(id).value='');
   document.getElementById('f_https').checked = false;
+  document.getElementById('f_bambu_family').value = 'x1';
   document.getElementById('f_type').value = 'bambu';
   toggleTypeFields();
   document.getElementById('addModal').classList.add('show');
@@ -2498,6 +2648,7 @@ async function submitAdd(){
   if(type === 'bambu'){
     body.access_code = document.getElementById('f_code').value.trim();
     body.serial = document.getElementById('f_serial').value.trim();
+    body.bambu_family = document.getElementById('f_bambu_family').value;
   } else if(type === 'octoprint'){
     body.api_key = document.getElementById('f_apikey').value.trim();
     body.port = document.getElementById('f_port').value.trim() || 80;
@@ -2693,6 +2844,7 @@ function dzDragLeave(ev){
 // Merkt sich Zuordnungs-Modal-Zustand fuer den aktuell offenen Vorgang
 let amsModalJobId = null;
 let amsModalPrinterId = null;
+let amsModalTotalFilaments = 0;
 
 async function dzDrop(ev, printerId){
   ev.preventDefault();
@@ -2769,6 +2921,11 @@ function colorNameFor(hex){
 function openAmsModal(printerId, data){
   amsModalJobId = data.job_id;
   amsModalPrinterId = printerId;
+  // WICHTIG (v1.6.2): Anzahl ALLER im Projekt definierten Filamente
+  // (nicht nur der hier angezeigten, ggf. gefilterten) - wird beim
+  // Zusammenbauen des finalen ams_mapping-Arrays in confirmAmsModal()
+  // gebraucht, siehe dortiger Kommentar.
+  amsModalTotalFilaments = data.total_filaments || (data.filaments ? data.filaments.length : 0);
 
   document.getElementById('amsModalFilename').textContent = data.filename;
   resetAmsProgress();
@@ -2809,7 +2966,7 @@ function amsRowHtml(filament, i, amsTrays){
 
   const groupName = 'ams-choice-' + i;
   return `
-    <div class="ams-row" data-filament-index="${i}" data-suggested="${suggested}">
+    <div class="ams-row" data-filament-index="${i}" data-true-index="${filament.index}" data-suggested="${suggested}">
       <div class="ams-swatch" style="background:#${filament.color}" title="${filamentHexTitle}"></div>
       <div class="ams-row-body">
         <div class="ams-row-label" title="${filamentHexTitle}">Filament ${i + 1} <span class="ams-row-type">(${filament.type || '-'} &middot; ${filamentColorName})</span></div>
@@ -2866,6 +3023,7 @@ async function cancelAmsModal(){
   closeAmsModal();
   amsModalJobId = null;
   amsModalPrinterId = null;
+  amsModalTotalFilaments = 0;
   if(jobId){
     try{ await fetch('/api/printers/' + printerId + '/print/cancel', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({job_id: jobId})
@@ -2879,12 +3037,26 @@ async function confirmAmsModal(){
   if(!jobId) return;
 
   const rows = document.querySelectorAll('#amsModalRows .ams-row');
-  const mapping = Array.from(rows).map(row => {
+  // WICHTIG (v1.6.2 - Bugfix "Zuordnungstabelle des AMS konnte nicht
+  // abgerufen werden" bei Mehrfarb-Drucken): Der Drucker erwartet ein
+  // ams_mapping-Array, dessen POSITIONEN den originalen Projekt-
+  // Filament-IDs entsprechen (aus der .3mf), NICHT die Position in
+  // dieser (ggf. gefilterten) Anzeige-Liste. Deshalb wird hier ein
+  // VOLLSTAENDIG GROSSES Array (Laenge = amsModalTotalFilaments)
+  // gebaut, mit -1 ("extern/manuell") an allen nicht angezeigten
+  // Positionen, und jedes angezeigte Filament wird an seiner ECHTEN
+  // Position (data-true-index, aus dem Backend uebernommen) einsortiert
+  // - nicht an der Position in der Anzeige-Reihenfolge.
+  const mapping = new Array(amsModalTotalFilaments || rows.length).fill(-1);
+  rows.forEach(row => {
     const i = row.dataset.filamentIndex;
+    const trueIndex = parseInt(row.dataset.trueIndex, 10);
     const suggested = parseInt(row.dataset.suggested, 10);
     const chosen = row.querySelector(`input[name="ams-choice-${i}"]:checked`).value;
-    if(chosen === 'suggested') return suggested;
-    return parseInt(document.getElementById('ams-other-' + i).value, 10);
+    const value = (chosen === 'suggested') ? suggested : parseInt(document.getElementById('ams-other-' + i).value, 10);
+    if(!Number.isNaN(trueIndex) && trueIndex >= 0 && trueIndex < mapping.length){
+      mapping[trueIndex] = value;
+    }
   });
 
   const btn = document.getElementById('amsModalConfirmBtn');
@@ -2941,6 +3113,7 @@ async function pollAmsProgress(printerId, jobId){
       }
       amsModalJobId = null;
       amsModalPrinterId = null;
+      amsModalTotalFilaments = 0;
       closeAmsModal();
       return;
     } else if(data.phase === 'error'){

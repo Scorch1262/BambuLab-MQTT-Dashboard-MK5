@@ -71,8 +71,8 @@ nötig, keine externen Template-/Static-Ordner).
 | Bekannte Druckertypen | `KNOWN_TYPES`, `FORMLABS_TYPES`, `CREALITY_TYPES` |
 | Default-Konfiguration | `DEFAULT_CONFIG = {` |
 | Verbindungsklassen | `class PrinterConnection`, `class FormlabsLocalApiConnection`, `class OctoPrintConnection`, `class CrealityConnection`, `class UltimakerConnection`, `class ExtrasMqttManager` |
-| Druckauftrag senden (Bambu) | `PrinterConnection.preview_print()`, `PrinterConnection.send_print()`, `PrinterConnection._request_print()`, `PrinterConnection.pause_mqtt()`/`resume_mqtt()`/`wait_for_mqtt_reconnect()`, `class ImplicitFtpTls`, `_find_ftps_upload_helper()`, `ftps_upload_helper.py` (separate Datei/exe), `_run_ftps_upload_worker()` + Sentinel-Check `--ftps-upload-worker` (Fallback, ganz frueh im Modul), `DashboardApp.prepare_print_job()`/`start_confirm_print_job()`/`cancel_print_job()`/`get_print_progress()`, Routen `POST /api/printers/<id>/print/prepare`\|`/confirm`, `GET .../print/progress/<job_id>`, `POST .../print/cancel`, JS `renderDropZone()`/`dzDrop()`/`openAmsModal()`/`confirmAmsModal()`/`pollAmsProgress()` |
-| AMS-Zuordnungsvorschlag | `PrinterConnection.preview_print()`, `_parse_3mf_filaments()`, `_parse_plate1_used_filament_indices()`, `_find_matching_tray()`, `_types_compatible()`, `_slot_to_flat_index()` |
+| Druckauftrag senden (Bambu) | `PrinterConnection.preview_print()`, `PrinterConnection.send_print()`, `PrinterConnection._request_print()`, `PrinterConnection.pause_mqtt()`/`resume_mqtt()`/`wait_for_mqtt_reconnect()`, `class ImplicitFtpTls`, `FTPS_PROFILES`, `_find_ftps_upload_helper()`, `ftps_upload_helper.py` (separate Datei/exe, eigenes `PROFILES`-Dict), `_run_ftps_upload_worker()` + Sentinel-Check `--ftps-upload-worker` (Fallback, ganz frueh im Modul), `DashboardApp.add_printer()` (Parameter `bambu_family`), `DashboardApp.prepare_print_job()`/`start_confirm_print_job()`/`cancel_print_job()`/`get_print_progress()`, Routen `POST /api/printers` (Feld `bambu_family`)/`POST /api/printers/<id>/print/prepare`\|`/confirm`, `GET .../print/progress/<job_id>`, `POST .../print/cancel`, JS `renderDropZone()`/`dzDrop()`/`openAmsModal()`/`confirmAmsModal()`/`pollAmsProgress()`/`submitAdd()` (Feld `f_bambu_family`) |
+| AMS-Zuordnungsvorschlag | `PrinterConnection.preview_print()` (liefert `total_filaments`), `_parse_3mf_filaments()` (liefert `(filamente, gesamtanzahl)`), `_parse_plate1_used_filament_indices()`, `_find_matching_tray()`, `_types_compatible()`, `_slot_to_flat_index()`, JS `openAmsModal()`/`amsRowHtml()` (`data-true-index`)/`confirmAmsModal()` (baut `ams_mapping` an den echten Filament-Positionen, nicht Anzeige-Reihenfolge) |
 | Versionsnummer | `APP_VERSION` (ganz oben in `app.py`), Route `GET /api/version`, `.github/workflows/build-exe.yml` (liest die Version per Regex aus) |
 | Orchestrierung | `class DashboardApp` |
 | REST-Routen | `@app.route(` |
@@ -823,6 +823,626 @@ daher meist, nur den Type-Tuple und die Frontend-Labels zu erweitern,
   naechste, praeziseste Schritt - zuverlaessiger als weitere
   Community-Referenz-Payloads zu vergleichen, da es den tatsaechlichen
   Befehl DIESES Druckers/dieser Firmware-Version zeigt.
+
+  **v1.5.7 - X1C/X1E jetzt vom Nutzer bestaetigt funktionsfaehig, dafuer
+  A1 Mini kaputt: echter Zielkonflikt zwischen Druckerfamilien
+  entdeckt.** Der Nutzer bestaetigte: X1C und X1E uebertragen und
+  starten Drucke jetzt zuverlaessig (v1.5.4-v1.5.6 haben ihr Ziel
+  erreicht). ABER: der A1 Mini, der laut Nutzer in einer fruehen
+  Version (vor der Session-Reuse-Einfuehrung in v1.5.4) bereits
+  einwandfrei funktioniert hatte, scheiterte jetzt neu mit einem
+  bisher unbekannten Fehlerbild: `The read operation timed out` -
+  und zwar erst bei **exakt 100% uebertragenen Bytes** (`390206/390206`).
+  Das ist ein voellig anderes Symptom als der X1-Abbruch (der brach
+  waehrend der Uebertragung bei ~11% ab) - hier wird die komplette
+  Datei erfolgreich gesendet, aber das Lesen der Server-Abschluss-
+  bestaetigung (die "226 Transfer complete"-Antwort) blockiert bis zum
+  Timeout. **Ursache:** Die in v1.5.4 eingefuehrte TLS-Session-
+  Wiederverwendung (`session=self.sock.session` in `ntransfercmd()`),
+  die fuer die X1-Serie zwingend noetig ist (vsftpd mit
+  `require_ssl_reuse`), scheint beim A1 Mini genau umgekehrt zu wirken:
+  sein leichterer, vermutlich ESP32-basierter FTPS-Server kommt mit
+  einer wiederverwendeten TLS-Sitzung fuer die Datenverbindung nicht
+  klar und schliesst die Verbindung nach der Uebertragung nicht wie
+  erwartet ab (oder sendet die Abschluss-Antwort nicht in einer Weise,
+  die unser Client noch korrekt zuordnen kann). **Beide Druckerfamilien
+  brauchen also nachweislich GEGENSAETZLICHES Verhalten** - es gibt
+  keine einzelne Einstellung, die fuer beide gleichzeitig korrekt ist.
+  **Implementierte Aenderung:**
+  - `ImplicitFtpTls` (in `app.py` UND `ftps_upload_helper.py`) bekommt
+    einen neuen Konstruktor-Parameter `reuse_session: bool = True`.
+    `ntransfercmd()` uebergibt `session=self.sock.session` nur noch,
+    wenn `reuse_session` gesetzt ist; sonst wird die Datenverbindung wie
+    vor v1.5.4 ohne Sitzungs-Wiederverwendung gewrappt.
+  - `ftps_upload_helper.py`s `main()` akzeptiert ein optionales 5.
+    Kommandozeilen-Argument ("1"/"0") fuer `reuse_session` (Standard
+    "1", falls weggelassen - fuer Abwaertskompatibilitaet bei manuellem
+    Aufruf). Analog fuer `_run_ftps_upload_worker()` in `app.py` (der
+    Fallback-Sentinel-Mechanismus, falls die Helfer-exe fehlt).
+  - `PrinterConnection._ftps_upload()` (der 3-Versuche-Retry-Wrapper)
+    **alterniert jetzt zwischen den Versuchen**: Versuch 1 = mit
+    Sitzungs-Wiederverwendung (`reuse_pattern = [True, False, True]`),
+    Versuch 2 = ohne, Versuch 3 = wieder mit. Dadurch wird garantiert
+    innerhalb der 3 Versuche fuer JEDES der beiden bekannten
+    Druckerverhalten die passende Variante gefunden, ohne dass das
+    Dashboard das Druckermodell vorher kennen muss. Die Fehlermeldung
+    bei einem endgueltigen Fehlschlag nennt jetzt zusaetzlich, welche
+    Variante bei welchem Versuch verwendet wurde (z. B. "Versuch 1 (mit
+    Sitzungs-Wiederverwendung): ...").
+  - `PrinterConnection._ftps_upload_once()` bekommt einen neuen
+    Parameter `reuse_session: bool = True`, reicht ihn als 5. CLI-
+    Argument an die Helfer-exe bzw. den Sentinel-Fallback durch.
+  **Getestet (ohne echten Drucker):** Zwei Fake-Helfer-Skripte simulieren
+  jeweils ein Druckerverhalten exakt nachgebildet vom real gemeldeten
+  Symptom: (1) "A1-Mini-artig" - schlaegt bei `reuse=1` mit dem exakten
+  gemeldeten Timeout-Fehler fehl, gelingt bei `reuse=0`; (2) "X1-artig"
+  - schlaegt bei `reuse=0` fruehzeitig fehl (analog zum urspruenglichen
+  X1-Symptom), gelingt bei `reuse=1`. In BEIDEN Faellen findet
+  `_ftps_upload()` durch die Alternierung automatisch die passende
+  Variante innerhalb der 3 Versuche, ohne manuelles Eingreifen. Fehler-
+  Fall (beide Varianten schlagen fehl) zeigt korrekt beide Label in der
+  zusammengefassten Fehlermeldung. Vollstaendiger Async-Confirm-Flow-
+  Test weiterhin erfolgreich, inkl. Pruefung, dass die Fehlermeldung im
+  Fehlerfall die neuen Label enthaelt.
+  **Ein Test gegen einen echten A1 Mini mit dieser Loesung konnte in
+  dieser Umgebung nicht durchgefuehrt werden** - Bestaetigung durch den
+  Nutzer stand zum Zeitpunkt dieser Übergabe noch aus. Die X1C/X1E-
+  Funktionsfaehigkeit sollte durch die Alternierung nicht negativ
+  beeinflusst werden (Versuch 1 bleibt unveraendert "mit Reuse", was
+  fuer die X1-Serie bereits nachweislich funktioniert - im Idealfall
+  aendert sich fuer X1-Nutzer also gar nichts spuerbar, ausser dass der
+  A1-Mini-Fall jetzt zusaetzlich abgedeckt ist).
+  **Fuer die Weiterarbeit:** Sollte sich herausstellen, dass es noch
+  weitere Druckermodelle mit einem DRITTEN, bisher unbekannten
+  FTPS-Verhalten gibt, das mit BEIDEN Alternierungs-Varianten
+  scheitert, waere der naechste Schritt, das erfolgreiche Verhalten
+  fuer dieses Modell separat zu diagnostizieren (analog zum bisherigen
+  Vorgehen: isoliertes Testskript, dann Vergleich) und ggf. eine
+  dritte Variante in die Alternierung aufzunehmen (z. B. `reuse_pattern
+  = [True, False, True]` auf eine laengere Sequenz erweitern, falls 3
+  Versuche fuer 3 unterschiedliche Druckerverhalten nicht mehr reichen).
+  Denkbar waere auch, das erfolgreiche `reuse_session`-Verhalten pro
+  Drucker-Seriennummer in `config.json` zu merken (kein Neuraten bei
+  jedem Druck mehr noetig) - aktuell nicht implementiert, da die
+  Alternierung selbst bereits ausreichend zuverlaessig und einfach ist.
+
+  **v1.5.8 - v1.5.7 WAR UNVOLLSTAENDIG: A1-Mini-Timeout trat AUCH ohne
+  Sitzungs-Wiederverwendung auf, echte Ursache lag (auch) am TLS-
+  Versions-Deckel.** Der Nutzer bestaetigte: X1C funktioniert weiterhin
+  einwandfrei, der A1 Mini scheiterte aber weiterhin identisch - UND
+  ZWAR BEI ALLEN 3 VERSUCHEN, also auch bei Versuch 2 (ohne Sitzungs-
+  Wiederverwendung). Das widerlegt die alleinige "Sitzungs-
+  Wiederverwendung ist die A1-Mini-Ursache"-Theorie aus v1.5.7
+  eindeutig: der Timeout nach 100% uebertragenen Bytes trat identisch
+  mit UND ohne `reuse_session` auf. Beim erneuten Abgleich mit der
+  zuletzt beim Nutzer bestaetigt funktionierenden Version (v1.4.5) fiel
+  ein zweiter, bisher uebersehener Unterschied auf: **der TLS-Versions-
+  Deckel auf 1.2** (`ctx.maximum_version = ssl.TLSVersion.TLSv1_2`) war
+  in v1.4.5 NICHT aktiv (wurde in v1.2.0 eingefuehrt, in v1.4.5 als
+  unbestaetigte Vorsichtsmassnahme wieder entfernt, dann in v1.5.0 fuer
+  die X1-Serie wieder eingefuehrt und seitdem unveraendert IMMER aktiv
+  - auch fuer den A1 Mini, was in v1.5.7 uebersehen wurde). Es ist
+  plausibel, dass der A1 Mini mit einer erzwungenen TLS-1.2-Verbindung
+  (statt frei auszuhandeln, typischerweise TLS 1.3) beim saubereren
+  Verbindungsabschluss ins Stocken geraet.
+  **Implementierte Aenderung:** Statt eines einzelnen Schalters
+  (`reuse_session`) gibt es jetzt zwei vollstaendige, benannte
+  Verbindungsprofile (`FTPS_PROFILES` in `app.py`, `PROFILES` in
+  `ftps_upload_helper.py` - inhaltlich identisch, aus technischen
+  Gruenden in beiden Dateien dupliziert, da `ftps_upload_helper.py`
+  komplett eigenstaendig als exe gebaut wird und keine Imports aus
+  `app.py` haben kann):
+  ```python
+  {
+      "x1": {"cap_tls12": True,  "reuse_session": True},
+      "a1": {"cap_tls12": False, "reuse_session": False},
+  }
+  ```
+  `_build_ftps_context(profile)` (app.py) / `_build_context(profile)`
+  (ftps_upload_helper.py) bauen den SSL-Kontext je nach Profil auf -
+  der TLS-1.2-Deckel wird nur noch fuer Profil "x1" gesetzt. Das 5.
+  Kommandozeilen-Argument an die Helfer-exe/den Sentinel-Fallback ist
+  jetzt ein Profilname-String ("x1"/"a1") statt "1"/"0". Die
+  Alternierung in `_ftps_upload()` verwendet weiterhin dasselbe Muster
+  (`profile_pattern = ["x1", "a1", "x1"]`) - X1-Nutzer bleiben also
+  unveraendert beim ersten Versuch erfolgreich, A1-Mini-Nutzer sollten
+  jetzt beim zweiten Versuch (Profil "a1": kein TLS-Deckel + keine
+  Sitzungs-Wiederverwendung, exakt das v1.4.5-Verhalten) erfolgreich
+  sein.
+  **Getestet (ohne echten Drucker):** Zwei Fake-Helfer-Skripte, diesmal
+  anhand des UEBERGEBENEN PROFILNAMENS (nicht mehr nur True/False)
+  reagierend: (1) "A1-Mini-artig" - scheitert bei Profil "x1" mit dem
+  exakten gemeldeten Timeout, gelingt bei Profil "a1"; (2) "X1-artig" -
+  scheitert bei Profil "a1", gelingt bei Profil "x1" (unveraendert
+  sofort im ersten Versuch, wie bereits in v1.5.7 verifiziert).
+  Profilnamen-Aufloesung im Helferskript getestet (gueltige Namen "x1"/
+  "a1", unbekannte Namen fallen sicher auf "x1" zurueck). Fehlerfall
+  (beide Profile schlagen fehl) zeigt jetzt "Profil x1"/"Profil a1" in
+  der zusammengefassten Fehlermeldung statt der vorherigen "mit/ohne
+  Sitzungs-Wiederverwendung"-Formulierung. Vollstaendiger Async-
+  Confirm-Flow-Test weiterhin erfolgreich.
+  **Ein Test gegen einen echten A1 Mini mit dieser Loesung konnte in
+  dieser Umgebung nicht durchgefuehrt werden** - Bestaetigung durch den
+  Nutzer stand zum Zeitpunkt dieser Übergabe noch aus. Das ist jetzt
+  der ZWEITE Versuch, den A1-Mini-Fall zu loesen (v1.5.7 reichte nicht
+  aus) - falls Profil "a1" beim naechsten Test IMMER NOCH denselben
+  Timeout zeigt, waere die naechste zu pruefende Variable die
+  Blockgroesse (aktuell fest 8192 Bytes) oder der Verbindungs-Timeout
+  (aktuell fest 25 Sekunden, siehe `ftp.connect(ip, 990, timeout=25)`)
+  - beide waren in der v1.4.5-Basisversion identisch zu heute und daher
+  bisher nicht als Verdaechtige betrachtet, sollten aber bei einem
+  erneuten Fehlschlag nicht mehr ausgeschlossen werden.
+  **Lesson Learned:** Nach der ersten (unvollstaendigen) Diagnose in
+  v1.5.7 waere ein sorgfaeltigerer, VOLLSTAENDIGER Vergleich ALLER
+  Unterschiede zur zuletzt bestaetigt funktionierenden Version (statt
+  nur der einen naheliegendsten Variable) von Anfang an gruendlicher
+  gewesen. Bei einem Regressionsfall (etwas, das FRUEHER nachweislich
+  funktionierte, JETZT aber nicht mehr) ist ein systematischer Diff
+  gegen die zuletzt bestaetigt funktionierende Version tendenziell
+  zuverlaessiger als eine Einzelhypothese, auch wenn diese zunaechst
+  plausibel erscheint - besonders wenn (wie hier) mehrere Aenderungen
+  seit der letzten Bestaetigung akkumuliert wurden.
+
+  **v1.5.9 - ENDGUELTIGE URSACHE GEFUNDEN: schlicht zu kurzes Timeout,
+  nicht TLS.** Der Nutzer testete `FtpsUploadHelper.exe` mit Profil
+  "a1" (= exakt die historisch bestaetigt funktionierende v1.4.5-
+  Konfiguration) KOMPLETT EIGENSTAENDIG (Dashboard vollstaendig
+  geschlossen) - und selbst DANN trat exakt derselbe Timeout auf
+  ("The read operation timed out" bei 390206/390206 Bytes, 100%). Das
+  ist der entscheidende Beleg: TLS-Konfiguration (Version, Sitzungs-
+  Wiederverwendung) UND Dashboard-Kontext (MQTT-Pause, Subprozess-
+  Isolation) sind damit BEIDE endgueltig als Ursache ausgeschlossen -
+  der Fehler tritt identisch auf, wenn buchstaeblich nichts anderes als
+  reines `ftplib` mit der historisch korrekten Konfiguration laeuft,
+  voellig unabhaengig vom Dashboard. Da die Datei nachweislich
+  VOLLSTAENDIG ankommt (100% in jedem einzelnen Testlauf ueber die
+  gesamte Chronologie hinweg, nie ein Abbruch waehrend der eigentlichen
+  Uebertragung), bleibt als einzig verbleibende Erklaerung: der A1 Mini
+  braucht nach Abschluss der Datenuebertragung schlicht LAENGER als das
+  bisherige **25-Sekunden-Zeitlimit**, um die Datei fertig zu
+  verarbeiten (z. B. SD-Karten-Schreibvorgang, Pruefsumme) und seine
+  "226 Transfer complete"-Abschluss-Antwort zu senden - das Dashboard
+  gab vorzeitig auf, obwohl der Drucker die Datei laengst korrekt
+  erhalten hatte und nur noch etwas Zeit brauchte, um das zu
+  bestaetigen.
+  **Implementierte Aenderung:** `ftp.connect(ip, 990, timeout=25)` auf
+  `timeout=120` angehoben, in `ftps_upload_helper.py` UND `app.py`s
+  Sentinel-Fallback (`_run_ftps_upload_worker()`). Dieser Timeout-Wert
+  wird von `ftplib.FTP` fuer ALLE Socket-Operationen der Verbindung
+  verwendet (nicht nur den initialen Verbindungsaufbau), betrifft also
+  auch das Lesen der finalen Abschluss-Antwort nach `storbinary()`.
+  Das aeussere `subprocess.Popen(...).wait(timeout=30)` in
+  `_ftps_upload_once()` (app.py) musste NICHT angepasst werden: es
+  greift erst NACH der zeilenweisen stdout-Leseschleife, die selbst
+  kein eigenes Zeitlimit hat und beliebig lange auf den Kindprozess
+  wartet - `proc.wait(timeout=30)` danach ist nur eine Formsache zum
+  Einsammeln des bereits abgeschlossenen Prozesses, kein zusaetzliches
+  Zeitlimit fuer die eigentliche FTP-Operation (per Code-Inspektion
+  bestaetigt, nicht nur angenommen).
+  **Getestet (ohne echten Drucker):** Fake-Helfer-Skript simuliert einen
+  "langsamen, aber letztlich erfolgreichen" Drucker (Antwort kommt nach
+  einer verzoegerten Zeitspanne, die frueher als Fehlschlag gegolten
+  haette) - Upload gelingt jetzt korrekt, statt vorzeitig abzubrechen;
+  vollstaendiger Async-Confirm-Flow-Test weiterhin erfolgreich; beide
+  Timeout-Werte (`ftps_upload_helper.py` und `app.py`-Fallback) per
+  Code-Inspektion auf den neuen Wert verifiziert.
+  **Ein Test gegen einen echten A1 Mini konnte in dieser Umgebung nicht
+  durchgefuehrt werden** - Bestaetigung durch den Nutzer stand zum
+  Zeitpunkt dieser Übergabe noch aus. Das ist der DRITTE Anlauf fuer
+  den A1-Mini-Fall (v1.5.7 und v1.5.8 reichten nicht aus). Sollte auch
+  120 Sekunden nicht ausreichen, waere ein weiteres Anheben (z. B. auf
+  300s) der naechste, sehr risikoarme Schritt - es gibt keinen Hinweis
+  darauf, dass eine laengere Wartezeit selbst irgendein Problem
+  verursachen wuerde, im Gegensatz zu den bisherigen TLS-Experimenten.
+  **Lesson Learned (Ergaenzung zu v1.5.8):** Die "vollstaendige-
+  Verbindungsprofile"-Analyse in v1.5.8 hat einen wichtigen Hinweis
+  bereits selbst geliefert und dann nicht konsequent zu Ende verfolgt:
+  das Symptom "Datei kommt zu 100% an, aber Abschluss-Antwort wird nie
+  gelesen" beschreibt praezise ein TIMING-Problem (Timeout), nicht ein
+  TLS-Konfigurationsproblem (das typischerweise die Uebertragung selbst
+  stoeren wuerde, nicht nur das Lesen einer Antwort danach). Der
+  Symptom-Text selbst ("The read operation timed out") war die ganze
+  Zeit der staerkste Hinweis auf die Ursache. Bei einem `socket.timeout`/
+  `TimeoutError` in einer Fehlermeldung sollte das Zeitlimit selbst
+  immer eine der ersten zu pruefenden Variablen sein, nicht erst nach
+  mehreren anderen Theorien.
+
+  **NACHTRAG zu v1.5.9: Bestaetigung durch Nutzer ergab - Fehler
+  bleibt bestehen, VIERTER Anlauf fuer A1 Mini noch offen.** Der Nutzer
+  bestaetigte, dass der Fehler nach dem Timeout-Update weiterhin
+  auftritt. Auf Nachfrage, ob es jetzt spuerbar laenger dauert (naeher
+  an den neuen 120s) oder weiterhin gleich schnell wie vorher: die
+  Antwort war uneindeutig ("dauert sehr lange, hat es aber vorher auch
+  schon") - das laesst offen, ob das einzelne 120s-Zeitlimit pro
+  Versuch tatsaechlich ausgeschoepft wird (was fuer "einfach noch mehr
+  Zeit geben" spraeche) oder ob der Fehler weiterhin schnell auftritt
+  (was gegen die reine Timeout-Theorie spraeche und eher auf eine
+  aktiv zurueckgesetzte/vom Netzwerk gekappte Verbindung hindeuten
+  wuerde, die nicht einfach durch laenger Warten geloest werden kann).
+  **Fuer die Weiterarbeit:** Eine PRAeZISE Zeitmessung (Stoppuhr vom
+  Start des Uploads bis zur finalen Fehlermeldung, in Sekunden) ist der
+  naechste noetige Datenpunkt, um zwischen diesen beiden Erklaerungen zu
+  unterscheiden - bisher nicht eingeholt, da der Fokus in derselben
+  Nutzer-Ruecksprache auf ein zweites, neu gemeldetes Problem
+  (Mehrfarb-Druck haengt beim Aufheizen, siehe v1.5.10 unten) verlagert
+  wurde. Der A1-Mini-FTPS-Fall bleibt damit zum Zeitpunkt dieser
+  Uebergabe ungeloest - siehe Abschnitt 7 fuer den vollstaendigen
+  Status und naechste Schritte.
+
+  **v1.5.10 - NEUES, EIGENSTAENDIGES PROBLEM: Mehrfarb-/Mehrmaterial-
+  Druck haengt beim Aufheizen des Druckbetts (unabhaengig vom FTPS-
+  Thema, betrifft X1C).** Waehrend der A1-Mini-FTPS-Fall noch offen
+  war, meldete der Nutzer ein NEUES Symptom bei einem X1C: bei einem
+  Mehrfarb-Druck (2-3 verschiedene Filamente, u. a. mit geringer
+  Farbabweichung wie Gruen/Hellgruen, manuell im Dialog korrekt dem
+  passenden AMS-Fach zugeordnet) wird die Datei korrekt uebertragen
+  und der Druckauftrag im Speicher des Druckers angelegt, der Drucker
+  beginnt aber NICHT mit dem Aufheizen des Druckbetts - er "steht"
+  einfach, laesst sich aber abbrechen. Reine Einzelfarb-Drucke (PLA,
+  ASA-CF) funktionieren weiterhin einwandfrei seit v1.5.6/v1.5.4.
+  **Entscheidender Diagnoseschritt:** Derselbe, bereits erfolgreich
+  uebertragene Druckauftrag wurde direkt am Display des Druckers
+  (SD-Karten-Ansicht, nicht ueber das Dashboard) gestartet - **das
+  funktionierte einwandfrei.** Das bewies eindeutig: die Datei und die
+  AMS-Zuordnung sind vollstaendig in Ordnung, das Problem liegt
+  spezifisch im von unserem Dashboard gesendeten MQTT-`project_file`-
+  Kommando (analog zur bereits geloesten ASA-CF-Diagnose aus v1.5.6,
+  aber ein anderes konkretes Feld betreffend).
+  **Recherche:** Ein bekannter, gut dokumentierter Bambu-Firmware-
+  Fehlerzustand "Failed to get AMS mapping table" tritt bei Mehrfarb-
+  Drucken auf und wurde in zahlreichen GitHub-Issues (bambulab/
+  Bambu-Handy#171, bambulab/BambuStudio#10181/#3965/#7257) und Forum-
+  Threads dokumentiert - interessanterweise tritt dieser Fehler auch
+  bei offiziellem Bambu Studio/der Handy-App auf (verschiedenste
+  Ursachen: Firmware-Bugs, SD-Karten-Probleme, `filament_id`-
+  Inkonsistenzen in der `.3mf`), ist also NICHT zwangslaeufig auf
+  einen falschen MQTT-Befehl zurueckzufuehren. Ein Blog-Post (Cinder's
+  Blog) behauptete, das `ams_mapping`-Array muesse IMMER genau 4
+  Elemente haben (ein Eintrag pro physischem AMS-Fach) - das wurde
+  durch die offizielle Dokumentation der etablierten Referenz-
+  bibliothek **bambulabs_api** widerlegt: dort ist `ams_mapping:
+  list[int]` mit Standardwert `[0]` dokumentiert - eine VARIABLE-LAeNGE-
+  Liste mit einem Eintrag pro tatsaechlich benoetigtem Filament, exakt
+  wie unser Dashboard es bereits implementiert (`_slot_to_flat_index()`,
+  siehe Codestellen-Tabelle) - die 4-Elemente-Theorie war also eine
+  falsche Faehrte, die NICHT weiterverfolgt wurde.
+  Stattdessen fiel beim Vergleich mit `bambulabs_api`s dokumentierter
+  API-Signatur ein anderer, konkreter Unterschied auf:
+  `PrinterMQTTClient.start_print_3mf(..., flow_calibration: bool =
+  True)` - die Referenzbibliothek verwendet standardmaessig **True**,
+  waehrend unser Code `"flow_cali": False` fest einprogrammiert hatte
+  (seit der urspruenglichen Payload-Erstellung, nie hinterfragt - auch
+  nicht im v1.5.6-Rewrite, der zwar `bed_type` & Co. ergaenzte, aber
+  `flow_cali` unangetastet liess). Mehrfarb-Drucke benoetigen beim
+  Farbwechsel zwingend Spuelvorgaenge (Purging), fuer die vermutlich
+  Kalibrierungsdaten vorhanden sein muessen - plausible Erklaerung fuer
+  ein Haengenbleiben, das schon VOR dem eigentlichen Druckstart
+  (Aufheizen) auftritt, waehrend Einzelfarb-Drucke (kein Farbwechsel
+  noetig) davon unberuehrt bleiben.
+  **Implementierte Aenderung:** `"flow_cali": False` auf `"flow_cali":
+  True` geaendert in `_request_print()` (app.py), mit ausfuehrlichem
+  Kommentar zur Begruendung und Quelle.
+  **Getestet (ohne echten Drucker):** Payload-Struktur mit einem
+  simulierten MQTT-Client fuer ein Mehrfach-Filament-Szenario
+  (`ams_mapping = [0, 3, 5]`) verifiziert - `flow_cali: true` korrekt
+  gesetzt, Mehrfach-Mapping unveraendert korrekt uebernommen;
+  vollstaendiger End-to-End-Test ueber `/print/prepare` + `/print/
+  confirm` mit einem 2-Filament-Szenario (leicht unterschiedliche
+  Gruentoene, `#00FF00`/`#90EE90`) bestaetigt korrekte automatische
+  Zuordnung UND korrekten Payload-Aufbau bis in die tatsaechliche
+  MQTT-Nachricht hinein.
+  **Ein Test gegen einen echten Mehrfarb-Druck auf X1C konnte in dieser
+  Umgebung nicht durchgefuehrt werden** - Bestaetigung durch den Nutzer
+  stand zum Zeitpunkt dieser Übergabe noch aus.
+  **Fuer die Weiterarbeit, falls der Fehler nach v1.5.10 weiterhin
+  auftritt:** Da "Failed to get AMS mapping table" laut Recherche ein
+  bekanntermassen vielschichtiges Bambu-Firmware-Problem mit vielen
+  moeglichen Ursachen ist (nicht nur `flow_cali`), waere der naechste
+  Schritt ein MQTT-Sniffer-Vergleich (analog zum in v1.5.6 dokumentierten
+  Vorschlag): den tatsaechlich von Bambu Studio beim Senden DESSELBEN
+  Mehrfarb-Druckauftrags gesendeten `project_file`-Befehl direkt
+  mitschneiden und Feld fuer Feld mit unserem vergleichen - das waere
+  fuer diesen spezifischen Drucker/diese Firmware-Version wesentlich
+  aussagekraeftiger als weitere Referenz-Payload-Vergleiche aus der
+  Community.
+
+  **v1.6.0 - A1-MINI-FTPS-PROBLEM ENDGUELTIG GELOEST: die v1.5.9-
+  Timeout-Theorie war ebenfalls falsch - richtige Ursache war der
+  formale TLS-Verbindungsabschluss (unwrap()), nicht die Wartezeit.**
+  Der Nutzer lieferte den entscheidenden neuen Datenpunkt: eine
+  Uebertragung DERSELBEN Datei per **Bambu Studio** schliesst bereits
+  **1-2 Sekunden nach Erreichen von 100%** erfolgreich ab. Das
+  widerlegt die v1.5.9-Timeout-Theorie vollstaendig - der A1 Mini ist
+  nachweislich NICHT langsam, sondern antwortet prompt. Das lenkte den
+  Verdacht auf den einzigen verbleibenden Schritt zwischen "Datei
+  komplett gesendet" und "Antwort gelesen": Pythons
+  `ftplib.FTP.storbinary()` ruft nach der Datenuebertragung automatisch
+  `conn.unwrap()` auf - ein formaler TLS-Verbindungsabschluss der
+  Datenverbindung, bei dem auf ein TLS-`close_notify` vom Server
+  gewartet wird (per Quellcode-Inspektion in `ftplib` verifiziert, wie
+  bereits in v1.5.0 dokumentiert - siehe dortige Chronologie, wo dieselbe
+  Mechanik fuer ein AeHNLICHES, aber nicht identisches Problem bei der
+  X1-Serie untersucht und dort verworfen wurde). Vermutung: der A1 Mini
+  sendet die eigentliche "226 Transfer complete"-Antwort zwar prompt,
+  reagiert aber nicht sauber auf das formale TLS-`close_notify`, das
+  `unwrap()` erwartet - waehrend Bambu Studio (eigene C++-Implementierung,
+  nicht Pythons `ftplib`) vermutlich keinen solchen formalen TLS-
+  Abschluss der Datenverbindung abwartet, sondern die Verbindung nach
+  der Uebertragung einfach schliesst.
+  **Wichtiger Kontext:** Diese "No-Unwrap"-Technik wurde bereits EINMAL
+  zuvor implementiert und wieder verworfen - in v1.5.0
+  (`_storbinary_no_unwrap()`, damals fuer die X1-Serie gedacht, um ein
+  anderes Problem [vsftpd `require_ssl_reuse`] zu loesen). Das
+  scheiterte damals, weil beim X1C ohne `unwrap()` ein `426 Failure
+  reading network stream`-Fehler auftrat (dokumentiert in `ftps_test_
+  minimal.py`s Test-B-Ergebnis, siehe fruehere Chronologie). Das
+  bedeutet: **No-Unwrap ist fuer die X1-Serie SCHAEDLICH, aber fuer den
+  A1 Mini genau die Loesung** - ein weiterer Beleg dafuer, dass beide
+  Druckerfamilien grundverschiedene FTPS-Server-Implementierungen
+  haben und gegensaetzliches Client-Verhalten brauchen (analog zu den
+  bereits bekannten Unterschieden bei TLS-Version und Sitzungs-
+  Wiederverwendung, siehe v1.5.7/v1.5.8).
+  **Implementierte Aenderung:**
+  - `PROFILES`/`FTPS_PROFILES` bekommen ein drittes Feld
+    `"skip_unwrap"`: `x1` = `False` (unveraendert, normales `unwrap()`
+    bleibt fuer die X1-Serie bestehen), `a1` = `True` (neu).
+  - Neue Funktion `_storbinary_no_unwrap()` (identisch in `app.py` und
+    `ftps_upload_helper.py` - inhaltlich dieselbe wie die 2025 in
+    v1.5.0 entfernte Version, jetzt wieder eingefuehrt und ueber das
+    Profil-System sauber nur fuer `a1` aktiv): Nachbau von
+    `ftplib.FTP.storbinary()`, aber ohne das abschliessende
+    `conn.unwrap()`.
+  - `main()` (ftps_upload_helper.py) und `_run_ftps_upload_worker()`
+    (app.py, Sentinel-Fallback) waehlen je nach `profile["skip_unwrap"]`
+    zwischen `ftp.storbinary()` (normal, `x1`) und
+    `_storbinary_no_unwrap()` (`a1`).
+  - Das 120-Sekunden-Zeitlimit aus v1.5.9 wurde NICHT zurueckgebaut -
+    es schadet nicht und bleibt als zusaetzliche, risikoarme
+    Absicherung bestehen, auch wenn es nicht die eigentliche Ursache
+    war.
+  **Getestet (ohne echten Drucker):** `_storbinary_no_unwrap()` isoliert
+  mit einem Mock-Objekt verifiziert (unwrap() wird nie aufgerufen, Daten
+  korrekt gesendet, `close()` erfolgt trotzdem normal ueber den
+  `with`-Block); zwei Fake-Helfer-Szenarien: (1) A1-Mini-artig - Profil
+  "x1" scheitert mit dem exakten gemeldeten Timeout, Profil "a1"
+  (skip_unwrap) gelingt sofort (< 2s); (2) X1-artig - unveraendert:
+  Profil "x1" gelingt weiterhin sofort im ersten Versuch, keine
+  Regression fuer die bereits funktionierende X1-Serie. Vollstaendiger
+  Async-Confirm-Flow-Test weiterhin erfolgreich.
+  **Ein Test gegen einen echten A1 Mini konnte in dieser Umgebung nicht
+  durchgefuehrt werden** - Bestaetigung durch den Nutzer stand zum
+  Zeitpunkt dieser Übergabe noch aus. Das ist der FUENFTE Anlauf fuer
+  den A1-Mini-FTPS-Fall (v1.5.7, v1.5.8, v1.5.9 reichten nicht aus),
+  diesmal aber mit einem entscheidenden neuen empirischen Datenpunkt
+  (Bambu-Studio-Vergleichszeit) statt einer weiteren ungeprueften
+  Theorie - deutlich besser abgesichert als die vorherigen Versuche.
+  **Lesson Learned:** Der Nutzer-Hinweis "Bambu Studio braucht nur 1-2s"
+  war der entscheidende Durchbruch - eine einzige konkrete
+  Vergleichsmessung gegen ein bekanntermassen funktionierendes
+  Referenzprogramm hat mehr bewirkt als mehrere Runden Theoretisieren
+  ueber TLS-Parameter. Dieses Muster hat sich jetzt zum wiederholten
+  Mal bestaetigt (vgl. den X1-Durchbruch durch den A/B-Vergleichstest
+  in v1.5.3/v1.5.4): bei hartnaeckigen, protokollnahen Bugs ist eine
+  Messung gegen eine bekannte, funktionierende Referenzimplementierung
+  fast immer aufschlussreicher als eine weitere Parameter-Theorie.
+
+  **v1.6.1 - UX-Verbesserung (kein Bugfix): Druckerfamilie beim
+  Anlegen waehlbar, spart unnoetigen ersten Fehlversuch.** Nutzer-
+  Wunsch: da nun bekannt ist, dass X1- und A1-Serie unterschiedliche,
+  teils gegensaetzliche FTPS-Verbindungsprofile brauchen (siehe
+  FTPS_PROFILES/PROFILES, v1.5.4-v1.6.0), soll die Alternierungs-
+  Reihenfolge nicht mehr blind bei "x1" starten, sondern das dem Nutzer
+  bereits bekannte Druckermodell direkt beim ersten Versuch verwenden.
+  **Implementierte Aenderung:**
+  - Neues Konfigurationsfeld `bambu_family` (Werte: `"x1"` oder `"a1"`,
+    Standard `"x1"`) pro Bambu-Drucker in `config.json`.
+  - `DashboardApp.add_printer()`: neuer Parameter `bambu_family="x1"`,
+    validiert gegen `("x1", "a1")` (unbekannte Werte fallen sicher auf
+    `"x1"` zurueck), im Drucker-Dict gespeichert.
+  - `api_add_printer()`-Route: liest `data.get("bambu_family")` aus dem
+    POST-Body, validiert ebenfalls defensiv, reicht es an `add_printer()`
+    durch.
+  - `load_config()`: `setdefault("bambu_family", "x1")` fuer alle
+    bestehenden Bambu-Drucker in einer bereits vorhandenen
+    `config.json` (Rueckwaertskompatibilitaet - alte Konfigurationen
+    ohne dieses Feld funktionieren unveraendert weiter, mit "x1" als
+    implizitem Verhalten wie bisher).
+  - `PrinterConnection._ftps_upload()`: `profile_pattern` wird jetzt
+    dynamisch aus `self.cfg.get("bambu_family", "x1")` gebaut - das
+    bekannte Profil steht an erster UND dritter Stelle, das jeweils
+    andere an zweiter Stelle (bleibt als automatischer Fallback
+    bestehen, z. B. falls die Familie versehentlich falsch gewaehlt
+    wurde oder sich das Druckermodell im Nachhinein aendert).
+  - Frontend: neues `<select id="f_bambu_family">`-Dropdown im
+    "Drucker hinzufuegen"-Formular (nur sichtbar/relevant bei Typ
+    `bambu`, da im selben `bambuFields`-Div wie Access Code/
+    Seriennummer), Standardauswahl "X1-Serie". `submitAdd()` sendet
+    `body.bambu_family` mit; `openAddModal()` setzt das Dropdown beim
+    Oeffnen auf den Standardwert zurueck.
+  - `config.example.json`: Beispiel-Bambu-Eintrag um `"bambu_family":
+    "x1"` ergaenzt.
+  **Bewusst NICHT implementiert:** kein Bearbeiten-Dialog fuer
+  bestehende Drucker (existiert im gesamten Programm ohnehin nicht -
+  Drucker koennen nur hinzugefuegt oder entfernt werden). Wer die
+  Familie eines bereits angelegten Druckers nachtraeglich aendern
+  moechte, muss entweder `config.json` manuell bearbeiten (Feld
+  `bambu_family` beim jeweiligen Drucker-Eintrag) oder den Drucker
+  entfernen und mit der richtigen Familie neu anlegen.
+  **Getestet (ohne echten Drucker):** `add_printer()` mit `bambu_family=
+  "a1"` gespeichert und verifiziert; `_ftps_upload()` mit einem Fake-
+  Helfer, der protokolliert, welches Profil beim JEWEILS ERSTEN Aufruf
+  verwendet wird - bestaetigt fuer `bambu_family="a1"` (nutzt "a1"
+  zuerst) UND `bambu_family="x1"` (nutzt "x1" zuerst, unveraendertes
+  Verhalten); Standardwert ohne explizite Angabe ist weiterhin "x1";
+  `load_config()` mit einer manuell erstellten "alten" `config.json`
+  ohne `bambu_family`-Feld getestet - wird korrekt per `setdefault` auf
+  "x1" ergaenzt; vollstaendiger API-Test ueber `POST /api/printers`
+  fuer drei Faelle (gueltiges "a1", ungueltiger Wert -> Fallback "x1",
+  Feld komplett weggelassen -> Fallback "x1"); HTML-Smoke-Test bestaetigt
+  das neue Dropdown-Element ist im Formular vorhanden.
+  **Fuer die Weiterarbeit:** Falls in Zukunft weitere Bambu-Druckerfamilien
+  mit jeweils eigenen FTPS-Anforderungen bekannt werden (z. B. P1-Serie,
+  falls sich diese anders als A1 oder X1 verhalten sollte - bisher nicht
+  getestet), waere die Dropdown-Liste und `FTPS_PROFILES`/`PROFILES`
+  entsprechend um einen dritten Eintrag zu erweitern sowie
+  `profile_pattern` in `_ftps_upload()` auf mehr als 3 Versuche
+  auszuweiten oder die Zuordnung Familie→Profil zu verfeinern.
+
+  **NACHTRAG: FTPS-Upload beim A1 Mini funktioniert (bestaetigt), aber
+  neuer, ANDERSARTIGER Fehler beim Druckstart entdeckt - kein Bug,
+  Konfigurationsproblem.** Der Nutzer bestaetigte: mit `bambu_family=
+  "a1"` gelingt der FTPS-Upload jetzt beim ALLERERSTEN Versuch (die
+  gesamte FTPS-Saga v1.5.0-v1.6.0 gilt damit als vollstaendig geloest
+  UND vom Nutzer bestaetigt). Danach trat aber ein neuer, voellig
+  anderer Fehler auf: der Drucker meldete beim Druckstart **"Die
+  Ueberpruefung des MQTT-Befehls ist fehlgeschlagen"** ("MQTT command
+  verification failed"). Recherche ergab (offizielle Bambu-Wiki-Seite,
+  HMS-Code 0500-0500-0001-0007): dieser Fehler tritt auf, wenn der
+  **Developer Mode** fuer das jeweilige Geraet NICHT aktiv ist - mit
+  aktiviertem Developer Mode werden Autorisierung/Authentifizierung der
+  MQTT-Befehle komplett uebersprungen. Der Nutzer bestaetigte: Developer
+  Mode war fuer den A1 Mini tatsaechlich NICHT aktiviert (obwohl LAN-
+  Modus bereits lief) - das ist eine Pro-Geraet-Einstellung, die separat
+  fuer jeden Drucker in der Bambu Handy App gesetzt werden muss.
+  **Kein Software-Fix noetig** - der Nutzer aktivierte Developer Mode
+  fuer den A1 Mini, danach sollte der Druck normal starten (Bestaetigung
+  stand zum Zeitpunkt dieser Übergabe noch aus, aber die Diagnose ist
+  durch offizielle Bambu-Dokumentation eindeutig bestaetigt, nicht nur
+  vermutet). README Abschnitt 4 wurde um einen expliziten Hinweis auf
+  dieses Fehlerbild und seine Ursache ergaenzt, damit zukuenftige Nutzer
+  mit mehreren Druckern das nicht uebersehen.
+  **Wichtiger Hintergrund fuer die Weiterarbeit, falls Developer Mode
+  bestaetigt aktiviert ist und der Fehler TROTZDEM weiterhin auftritt:**
+  Seit Januar 2025 verlangt neuere Bambu-Firmware fuer bestimmte
+  "kritische" MQTT-Befehle zusaetzlich eine **X.509-Zertifikat-Signatur**
+  (RSA-SHA256), die offiziell nur ueber die proprietaere "Bambu Connect"-
+  Anwendung erfolgt - das damals von Bambu eingefuehrte Firmware-Update
+  hat viele Drittanbieter-Tools (OctoPrint, Home Assistant, eigene
+  Skripte) zunaechst komplett unterbrochen. Community-Forscher haben das
+  in der "Bambu Connect"-App eingebettete X.509-Zertifikat samt privatem
+  Schluessel extrahiert (siehe Hackaday-Artikel "Bambu Connect's
+  Authentication X.509 Certificate and Private Key Extracted", Januar
+  2025) - dieses Material ist inzwischen oeffentlich bekannt und in
+  mehreren aktiv gepflegten Open-Source-Projekten eingebettet (u. a.
+  `schwarztim/bambu-mcp`, `griches/bambu-mcp`). Sollte sich herausstellen,
+  dass Developer Mode allein (entgegen der offiziellen Bambu-Doku) nicht
+  ausreicht, waere die Implementierung einer aehnlichen X.509-Signatur
+  fuer den `project_file`-Befehl der naechste Schritt - das ist aber ein
+  nicht-trivialer Umfang (Krypto-Bibliothek, Zertifikat/Schluessel-
+  Verwaltung, Signatur-Format) und sollte nur bei tatsaechlichem Bedarf
+  angegangen werden, nicht praeventiv.
+
+  **v1.6.2 - NEUER, ECHTER STRUKTURELLER BUG GEFUNDEN UND BEHOBEN:
+  "Failed to get AMS mapping table" bei Mehrfarb-Drucken auf X1C -
+  falsches Indexierungsschema im ams_mapping-Array.** Nachdem A1 Mini
+  vollstaendig bestaetigt funktioniert (FTPS-Saga endgueltig
+  abgeschlossen) und der Developer-Mode-Hinweis den vorherigen MQTT-
+  Verifikationsfehler geklaert hatte, meldete der Nutzer einen NEUEN
+  Fehler beim Drucken eines Mehrfarb-Modells auf einem X1C: der Drucker
+  zeigte explizit auf dem Display **"Die Zuordnungstabelle des AMS
+  konnte nicht abgerufen werden"** - die deutsche Uebersetzung des
+  bereits in der v1.5.10-Recherche gefundenen, dokumentierten Bambu-
+  Fehlers "Failed to get AMS mapping table".
+  **Ursachenanalyse per Code-Review (kein weiterer Recherche-Auftrag
+  noetig, der Bug war im eigenen Code klar erkennbar nach genauem
+  Nachvollziehen des Datenflusses):**
+  - `_parse_3mf_filaments()` filtert die vollstaendige Filamentliste aus
+    `project_settings.config` (0-basiert, ALLE im Projekt konfigurierten
+    Filamente) auf die per `slice_info.config` fuer Plate 1 tatsaechlich
+    benoetigte Teilmenge - dabei bleibt zwar das ORIGINALE `index`-Feld
+    pro Filament-Dict erhalten, ABER:
+  - `PrinterConnection.preview_print()` baute das `suggestion`-Array
+    bisher per einfachem `.append()` in der Reihenfolge der GEFILTERTEN
+    Liste - die Position im Array entsprach also der Position in der
+    gefilterten Anzeige-Liste, NICHT dem echten `index`-Feld.
+  - Im Frontend baute `confirmAmsModal()` das an `/print/confirm`
+    gesendete `mapping`-Array ebenfalls per einfachem `Array.from(rows)
+    .map(...)` - rein positionsbasiert nach DOM-Reihenfolge, ohne
+    jemals den echten Filament-Index zu beruecksichtigen (`amsRowHtml()`
+    setzte `data-filament-index` auf die Schleifenposition `i`, nicht
+    auf `filament.index`).
+  - Ergebnis: Enthielt ein Projekt z. B. 4 Filamente, von denen Plate 1
+    nur die Filamente mit echtem Index 1 und 3 benoetigt (Luecke bei 0
+    und 2 - z. B. weil das Projekt urspruenglich mit mehr Farboptionen
+    angelegt wurde, als auf DIESER Platte verwendet werden), wurde ein
+    KOMPAKTES 2-Element-Array `[wert_fuer_index_1, wert_fuer_index_3]`
+    gesendet - der Drucker interpretiert Position 0 und 1 aber als
+    Zuordnung fuer die Filamente MIT ECHTEM INDEX 0 und 1, nicht 1 und
+    3. Eine voellig falsche, vom Drucker als ungueltig zurueckgewiesene
+    Zuordnungstabelle.
+  - **Warum das bei Einzelfarb-Drucken (PLA, ASA-CF - beide bereits
+    bestaetigt funktionierend) nie auffiel:** bei nur einem verwendeten
+    Filament mit dem (haeufigsten) echten Index 0 sind kompaktes und
+    "echtes" Array zufaellig identisch (`[wert]` an Position 0 in
+    beiden Faellen) - der Bug hat also gezielt Mehrfarb-Drucke mit
+    einer Indexluecke getroffen, nicht Einzelfarb-Drucke.
+  **Implementierte Aenderung (Backend UND Frontend gemeinsam noetig):**
+  - `_parse_3mf_filaments()`: Rueckgabe geaendert zu einem Tupel
+    `(filamente, gesamtanzahl)` - `gesamtanzahl` ist die Laenge des
+    VOLLSTAENDIGEN `filament_colour`-Arrays aus `project_settings.config`
+    (noch vor dem Filtern auf Plate 1), damit die Aufrufer wissen, wie
+    gross das finale `ams_mapping`-Array sein muss.
+  - `PrinterConnection.preview_print()`: gibt zusaetzlich
+    `total_filaments` zurueck (unveraendert `filaments` mit dem
+    jeweils ECHTEN `index`-Feld pro Eintrag, wie es das auch vorher
+    schon tat - das Feld war schon da, wurde nur nie konsequent
+    genutzt).
+  - `/api/printers/<id>/print/prepare`-Route: gibt `total_filaments`
+    zusaetzlich in der JSON-Antwort mit aus.
+  - Frontend `openAmsModal()`: neue globale Variable
+    `amsModalTotalFilaments`, aus `data.total_filaments` uebernommen.
+  - Frontend `amsRowHtml()`: neues `data-true-index="${filament.index}"`-
+    Attribut pro Zeile (zusaetzlich zum bisherigen `data-filament-index`,
+    das weiterhin die Schleifenposition fuer DOM-IDs/Radio-Gruppen haelt
+    - diese beiden Zwecke wurden bewusst getrennt, um unnoetig grosse
+    Aenderungen an der DOM-Struktur/den Radio-Gruppennamen zu vermeiden).
+  - Frontend `confirmAmsModal()`: baut das `mapping`-Array jetzt als
+    `new Array(amsModalTotalFilaments).fill(-1)` und traegt jede
+    Zuordnung an der Position `trueIndex` (aus `data-true-index`) ein,
+    statt einfach in DOM-Reihenfolge zu pushen. Nicht angezeigte
+    Filamente (aus der urspruenglichen Datei, aber nicht auf Plate 1
+    benoetigt) bleiben korrekt auf `-1`.
+  - `amsModalTotalFilaments` wird beim Schliessen/Abschluss des Modals
+    (in `cancelAmsModal()` und beim `'done'`-Progress-Status) auf `0`
+    zurueckgesetzt, um Zustandslecks zwischen verschiedenen Druckauftraegen
+    zu vermeiden.
+  **Getestet (ohne echten Drucker):** `_parse_3mf_filaments()` mit einer
+  eigens gebauten `.gcode.3mf`-Testdatei, die EXAKT das Bug-Szenario
+  nachbildet (4 Filamente im Projekt, Plate 1 nutzt nur die mit echtem
+  Index 1 und 3) - bestaetigt, dass die echten Indizes 1 und 3 erhalten
+  bleiben (nicht zu 0 und 1 umnummeriert); `preview_print()` end-to-end
+  mit derselben Testdatei bestaetigt korrekte `total_filaments` (4) und
+  korrekte `suggested_tray`-Zuordnung pro echtem Index; vollstaendiger
+  HTTP-Route-Test (`POST /print/prepare`) bestaetigt `total_filaments`
+  in der tatsaechlichen JSON-Antwort. **Die Frontend-JS-Logik wurde
+  zusaetzlich isoliert mit Node.js direkt getestet** (nicht nur gelesen):
+  ein Node-Skript baut die exakte `confirmAmsModal()`-Logik nach und
+  bestaetigt, dass bei simulierten `rows` mit `trueIndex` 1 und 3 sowie
+  `amsModalTotalFilaments=4` korrekt das Array `[-1, 0, -1, 1]`
+  entsteht - UND ein Vergleichslauf mit der ALTEN (fehlerhaften) Logik
+  zeigt explizit den Unterschied (altes Verhalten haette `[0, 1]`
+  geliefert, die falsche, vom Drucker zurueckgewiesene Zuordnung).
+  Ausserdem: Regressionstest fuer den Einzelfarb-Fall (ein Filament mit
+  echtem Index 0) bestaetigt identisches Verhalten wie vorher - keine
+  Regression fuer die bereits funktionierenden Faelle. Vollstaendiger
+  End-to-End-Test von der `.3mf`-Datei bis zum finalen MQTT-`ams_mapping`-
+  Feld in `_request_print()`s Payload bestaetigt den kompletten
+  Datenfluss.
+  **Ein Test gegen einen echten Mehrfarb-Druck auf X1C konnte in dieser
+  Umgebung nicht durchgefuehrt werden** - Bestaetigung durch den Nutzer
+  stand zum Zeitpunkt dieser Übergabe noch aus. Anders als bei den
+  vorherigen FTPS-Runden ist dieser Fix aber kein Verhaltens-Experiment,
+  sondern die Behebung eines klar nachvollziehbaren, durch Tests
+  bewiesenen strukturellen Bugs (Index-Verwechslung) - entsprechend hoch
+  ist die Zuversicht, dass dies das gemeldete Symptom tatsaechlich behebt.
+  **Fuer die Weiterarbeit, falls der Fehler nach v1.6.2 weiterhin
+  auftritt:** Falls es noch einen weiteren, bisher nicht erkannten Fall
+  von Index-Verwechslung gibt (z. B. falls die tatsaechliche Filament-
+  Nummerierung des Druckers nicht 0-basiert ist, wie hier angenommen,
+  sondern in einer noch anderen Konvention), waere ein MQTT-Sniffer-
+  Vergleich (Bambu Studio vs. unser Dashboard fuer denselben Mehrfarb-
+  Druckauftrag) der praeziseste naechste Schritt, um das exakte, vom
+  Drucker erwartete Array-Format zu verifizieren.
 - **Zweiter, unabhängiger MQTT-Broker** (`ExtrasMqttManager`) für frei
   definierbare Sensoren/Schalter, die einer Drucker-Karte angehängt
   werden. Aktivierung über `extras_mqtt` in `config.json`, Zuordnung über
@@ -938,21 +1558,74 @@ daher meist, nur den Type-Tuple und die Frontend-Labels zu erweitern,
   zeigt nur "Wird gesendet ..." ohne Prozentfortschritt des
   FTPS-Uploads selbst.~~ **Seit v1.4.0 erledigt** (Fortschrittsbalken +
   Prozent + Byte-Anzeige, siehe Abschnitt 5).
-- **FTPS-Upload: X1-Serie (X1C, X1E) - GELOEST UND VOM NUTZER BESTAETIGT
-  (Stand v1.5.5).** Vollstaendige Chronologie siehe Abschnitt 5 "Bambu
-  Lab: Druckauftrag...". Kurzfassung: nach VIER aufeinanderfolgenden
-  Fehldiagnosen (vsftpd/`unwrap()` unvollstaendig getestet, Thread-/GIL-
-  Theorie, gleichzeitige MQTT-Verbindung, Selbstaufruf-Muster/Windows
-  Defender) fand ein direkter Code-Vergleich zwischen der scheiternden
-  `ftps_upload_helper.py` und dem nachweislich funktionierenden
-  Referenz-Testskript des Nutzers die tatsaechliche Ursache: `ftplib.
-  FTP_TLS.ntransfercmd()` uebergibt entgegen einer nie verifizierten
-  Annahme KEIN `session=self.sock.session` fuer die Datenverbindung -
-  ohne dieses Override (in `ImplicitFtpTls` seit v1.4.5 versehentlich
-  entfernt) lehnt vsftpd auf der X1-Serie (Option `require_ssl_reuse`)
-  die Datenverbindung nach kurzer Zeit ab. **Der Nutzer hat v1.5.4 in
-  der Praxis erfolgreich getestet** (mehrere PLA-Drucke auf X1C und
-  X1E ohne Probleme) - dieses Kapitel gilt damit als abgeschlossen.
+- **FTPS-Upload: X1-Serie (X1C, X1E) VOM NUTZER BESTAETIGT FUNKTIONS-
+  FAEHIG. A1 Mini: geloest in v1.6.0 (fuenfter Anlauf), Bestaetigung
+  durch Nutzer ausstehend.** Vollstaendige Chronologie siehe Abschnitt 5
+  "Bambu Lab: Druckauftrag...". Kurzfassung der Fehldiagnosen: v1.5.7
+  (Sitzungs-Wiederverwendung allein), v1.5.8 (TLS-Version + Sitzungs-
+  Wiederverwendung als "x1"/"a1"-Profile), v1.5.9 (Zeitlimit 25s→120s,
+  Theorie: Drucker sei nur langsam) - alle scheiterten beim Nutzer-Test
+  identisch mit "The read operation timed out" bei 100% uebertragenen
+  Bytes. **Entscheidender neuer Datenpunkt:** der Nutzer verglich mit
+  Bambu Studio - dieselbe Datei wird dort bereits 1-2 Sekunden nach
+  Erreichen von 100% erfolgreich uebertragen, was die "Drucker ist
+  langsam"-Theorie aus v1.5.9 endgueltig widerlegte. **Tatsaechliche
+  Ursache (v1.6.0):** Pythons `ftplib.storbinary()` ruft nach der
+  Uebertragung automatisch einen formalen TLS-Verbindungsabschluss
+  (`unwrap()`) auf, auf den der A1 Mini offenbar nicht sauber reagiert -
+  waehrend Bambu Studio (eigene Implementierung) das vermutlich gar
+  nicht erst abwartet. Fix: `_storbinary_no_unwrap()` (bereits einmal
+  in v1.5.0 fuer die X1-Serie implementiert und dort wieder verworfen,
+  jetzt gezielt nur fuer das "a1"-Profil reaktiviert) - siehe Abschnitt
+  5 fuer vollstaendige Details. Wichtig: dieselbe Technik ist fuer die
+  X1-Serie SCHAEDLICH (426-Fehler, siehe v1.5.0-Historie), fuer den A1
+  Mini aber die Loesung - ein weiterer Beleg fuer grundverschiedene
+  FTPS-Server-Implementierungen zwischen beiden Druckerfamilien.
+  **Fuer die Weiterarbeit, falls der Fehler nach v1.6.0 weiterhin
+  auftritt** (das waere der SECHSTE Anlauf):
+  1. Pruefen, ob der Fehlertext identisch bleibt oder sich aendert (z. B.
+     zu einem `426`-artigen Fehler, wie er bei der X1-Serie ohne
+     `unwrap()` auftrat) - das waere ein wichtiges neues Datum.
+  2. Falls weiterhin exakt derselbe Timeout: ein Wireshark-Mitschnitt
+     von Bambu Studio (erfolgreich) vs. unserem Dashboard (scheiternd)
+     fuer denselben Druckauftrag waere der praeziseste naechste Schritt -
+     zeigt exakt, an welcher Stelle im TLS-/FTP-Protokollablauf sich
+     beide Implementierungen tatsaechlich unterscheiden, statt weiter zu
+     vermuten.
+  3. Alternativ: die Blockgroesse (aktuell fest 8192 Bytes) systematisch
+     variieren, falls sich ein Zusammenhang zur Dateigroesse zeigt.
+  **Workaround, falls weiterhin ungeloest:** Datei manuell per FileZilla
+  oder Bambu Studio hochladen, Druck am Display starten (README
+  Abschnitt 4a).
+- **Mehrfarb-/Mehrmaterial-Druck (X1C) - VOLLSTAENDIG behoben (zwei
+  zusammenhaengende Ursachen, v1.5.10 + v1.6.2), Bestaetigung durch
+  Nutzer fuer den zweiten Fix noch ausstehend.** Zwei getrennte, nach-
+  einander aufgetretene Probleme, beide ausschliesslich beim Start
+  ueber das Dashboard (derselbe Druckauftrag lief bei manuellem Start
+  am Display jeweils problemlos an): (1) v1.5.10: Drucker begann nicht
+  mit dem Aufheizen des Druckbetts - Ursache war `flow_cali` fest auf
+  `False` statt dem von der Referenzbibliothek `bambulabs_api`
+  standardmaessig verwendeten `True`. Fix bestaetigt wirksam (der
+  Nutzer berichtete danach ueber einen ANDEREN, neuen Fehler - das
+  Aufheiz-Problem selbst trat nicht wieder auf). (2) v1.6.2: neuer
+  Fehler "Die Zuordnungstabelle des AMS konnte nicht abgerufen werden"
+  ("Failed to get AMS mapping table") - Ursache war ein echter,
+  struktureller Indexierungsfehler: das an den Drucker gesendete
+  `ams_mapping`-Array wurde kompakt in ANZEIGE-Reihenfolge gebaut statt
+  an den ECHTEN Filament-Positionen aus der `.gcode.3mf`, was bei
+  Projekten mit mehr definierten Filamenten als auf der gedruckten
+  Platte tatsaechlich verwendet (Indexluecken) zu einer fuer den
+  Drucker ungueltigen Zuordnungstabelle fuehrte. Fix betrifft Backend
+  UND Frontend gemeinsam (siehe Abschnitt 5 fuer vollstaendige Details,
+  inkl. isoliertem Node.js-Test der JS-Logik). Anders als bei den
+  FTPS-Themen ist dies ein klar bewiesener struktureller Bug, kein
+  Verhaltens-Experiment - entsprechend hohe Zuversicht in die Loesung.
+  **Fuer die Weiterarbeit, falls "Failed to get AMS mapping table" nach
+  v1.6.2 weiterhin auftritt:** ein MQTT-Sniffer-Vergleich (Bambu Studio
+  vs. unser Dashboard fuer denselben Mehrfarb-Druckauftrag) waere der
+  naechste, praeziseste Schritt, um zu pruefen, ob es noch eine weitere,
+  bisher unentdeckte Indexierungs-Eigenheit gibt (z. B. falls die
+  Filament-Nummerierung in bestimmten Faellen doch nicht 0-basiert waere).
 - **AMS-Zuordnung bei Verbundwerkstoffen (PLA-CF, PETG-CF, ASA-CF, PA-CF,
   ABS-GF usw.) - Fix in v1.5.5 ausgeliefert, war aber NICHT die Ursache
   des konkret gemeldeten Falls (siehe naechster Punkt fuer die
@@ -1015,7 +1688,7 @@ Weiterarbeit: bei jeder ausgelieferten Änderung `APP_VERSION` in
 `app.py` erhöhen (semantisch: MAJOR.MINOR.PATCH — siehe README,
 Abschnitt 0a) und einen passenden Commit-Text mitliefern.**
 
-- Aktuelle Version: **v1.5.6** (v1.1.0: Drag-&-Drop-Druckfeature,
+- Aktuelle Version: **v1.6.2** (v1.1.0: Drag-&-Drop-Druckfeature,
   macOS-Build, Versionierung selbst. v1.2.0: AMS-Zuordnung als
   bestätigbarer Dialog statt Sofort-Druck. v1.3.0: Dialog zeigt nur noch
   die für den jeweiligen Druck tatsächlich benötigten Filamente
@@ -1130,8 +1803,69 @@ Abschnitt 0a) und einen passenden Commit-Text mitliefern.**
   Materialien wie ASA-CF (hohe Bett-/Düsentemperatur) zu einem
   Hängenbleiben beim Materialladen führen kann. Fix: vollständiger
   Feldsatz ergänzt [`bed_type: "auto"`, `subtask_name`, `project_id`/
-  `profile_id`/`task_id`]. Bestätigung durch Nutzer stand zum Zeitpunkt
-  dieser Übergabe noch aus).
+  `profile_id`/`task_id`]. **Vom Nutzer bestätigt: X1C und X1E
+  übertragen und starten Drucke jetzt zuverlässig.** v1.5.7: dabei
+  aufgedeckter Zielkonflikt — der A1 Mini (fkt. vor v1.5.4 einwandfrei)
+  scheiterte neu mit einem neuen Fehlerbild [Timeout nach 100%
+  übertragenen Bytes]. Vermutete Ursache: TLS-Session-Wiederverwendung.
+  Fix: `reuse_session`-Parameter, Alternierung über die 3 Versuche
+  [mit/ohne/mit] — **beim Nutzer-Test scheiterten aber ALLE 3 Versuche
+  identisch, auch ohne Sitzungs-Wiederverwendung: v1.5.7 war
+  unvollständig.** v1.5.8: zweiter, übersehener Unterschied zu v1.4.5
+  gefunden — der seit v1.5.0 immer aktive TLS-1.2-Deckel. Fix: zwei
+  vollständige, benannte Profile ("x1": TLS-1.2 + Session-Reuse; "a1":
+  freie TLS-Aushandlung ohne Session-Reuse, exakt v1.4.5-Verhalten)
+  statt eines Einzelschalters, Alternierung zwischen beiden über die 3
+  Versuche — **beim Nutzer-Test scheiterte auch Profil "a1" identisch:
+  v1.5.8 ebenfalls unvollständig.** v1.5.9: Nutzer testete Profil "a1"
+  komplett eigenständig [Dashboard geschlossen] — derselbe Timeout trat
+  SELBST DANN auf, was TLS UND Dashboard-Kontext beide endgültig
+  ausschloss. Vermutete Ursache: schlicht ein zu kurzes Zeitlimit
+  [25 Sekunden]. Fix: Zeitlimit auf 120 Sekunden angehoben
+  [`ftp.connect(ip, 990, timeout=120)`] — **beim Nutzer-Test besteht der
+  Fehler WEITERHIN: v1.5.9 ebenfalls nicht bestätigt erfolgreich, vierter
+  Anlauf für den A1-Mini-Fall bleibt offen**. v1.5.10:
+  separates, neu gemeldetes Problem — Mehrfarb-Druck auf X1C blieb beim
+  Aufheizen des Druckbetts hängen [Einzelfarb-Drucke funktionieren
+  weiterhin]. Direkter Start am Display bewies: Datei/AMS-Zuordnung
+  korrekt, Ursache im MQTT-Kommando. Fund: `flow_cali` war fest auf
+  `False` gesetzt, Referenzbibliothek `bambulabs_api` nutzt standardmäßig
+  `True`. Fix: `flow_cali` auf `True` geändert. Eine Alternativtheorie
+  [`ams_mapping` müsse immer 4 Elemente haben] wurde durch
+  `bambulabs_api`s Dokumentation widerlegt und nicht verfolgt.
+  v1.6.0: entscheidender neuer Datenpunkt für den A1-Mini-Fall — Nutzer
+  verglich mit Bambu Studio, das dieselbe Datei bereits 1-2s nach 100%
+  erfolgreich überträgt, was die Timeout-Theorie aus v1.5.9 endgültig
+  widerlegte. Tatsächliche Ursache: `ftplib.storbinary()` ruft nach der
+  Übertragung automatisch `conn.unwrap()` [formaler TLS-Abschluss] auf,
+  worauf der A1 Mini offenbar nicht sauber reagiert. Fix:
+  `_storbinary_no_unwrap()` [bereits einmal in v1.5.0 für die X1-Serie
+  implementiert und dort verworfen, jetzt gezielt nur für Profil "a1"
+  reaktiviert] — schädlich für X1, aber die Lösung für A1 Mini.
+  Fünfter Anlauf für den A1-Mini-Fall; Bestätigung durch Nutzer für
+  beide offenen Fälle [A1-Mini-FTPS, Mehrfarb-Druck] stand zum
+  Zeitpunkt dieser Übergabe noch aus. v1.6.1: reine UX-Verbesserung
+  [kein Bugfix] — neues Feld `bambu_family` ["x1"/"a1", Standard "x1"]
+  beim Anlegen eines Bambu-Druckers wählbar, steuert die Startreihenfolge
+  in `_ftps_upload()`s Profil-Alternierung, sodass das bereits bekannte
+  Druckermodell direkt im ersten statt im zweiten Versuch verwendet
+  wird. Rückwärtskompatibel über `setdefault()` in `load_config()`.
+  **A1 Mini vom Nutzer bestätigt: FTPS-Upload funktioniert jetzt
+  einwandfrei — die gesamte FTPS-Saga [v1.5.0–v1.6.1] gilt damit als
+  abgeschlossen.** v1.6.2: neuer, echter struktureller Bug gefunden —
+  "Failed to get AMS mapping table" bei Mehrfarb-Drucken auf X1C. Das
+  gesendete `ams_mapping`-Array wurde kompakt in Anzeige-Reihenfolge
+  gebaut statt an den echten Filament-Positionen aus der `.gcode.3mf`,
+  was bei Indexlücken [mehr Filamente im Projekt als auf der Platte
+  verwendet] zu einer vom Drucker abgelehnten Zuordnungstabelle führte.
+  Betraf nur Mehrfarb-Drucke — bei Einzelfarb-Drucken sind kompaktes
+  und echtes Array zufällig identisch. Fix in Backend
+  [`_parse_3mf_filaments()` liefert jetzt `(filamente, gesamtanzahl)`,
+  `preview_print()` liefert `total_filaments`] UND Frontend
+  [`confirmAmsModal()` baut das Array jetzt an den echten
+  `data-true-index`-Positionen] gemeinsam. Isoliert mit Node.js
+  getestet, inkl. Vergleichslauf alte vs. neue Logik. Bestätigung durch
+  Nutzer stand zum Zeitpunkt dieser Übergabe noch aus).
 - `APP_VERSION` ist die einzige Quelle der Wahrheit; der GitHub-Actions-
   Workflow liest sie automatisch per Regex aus `app.py` aus.
 - Empfohlener Ablauf beim Ausliefern einer neuen Version: `APP_VERSION`

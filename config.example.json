@@ -22,6 +22,7 @@
       "serial": "00M00A000000000",
       "mqtt_port": 8883,
       "camera_port": 6000,
+      "bambu_family": "x1",
       "extras": []
     },
     {
