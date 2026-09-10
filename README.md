@@ -1,4 +1,4 @@
-# Bambu Lab Drucker Dashboard
+# Bambu Lab + Formlabs Drucker Dashboard
 
 ![Bild](Unbenannt.PNG)
 
@@ -56,8 +56,8 @@ mit `APP_VERSION` in `app.py` uebereinstimmen, siehe Abschnitt "Versionierung"
 weiter unten), legt der Workflow automatisch einen GitHub Release mit
 **beiden** Zip-Paketen als Download an:
 ```bash
-git tag v1.6.2
-git push origin v1.6.2
+git tag v1.6.5
+git push origin v1.6.5
 ```
 
 Der Workflow braucht keine weiteren Geheimnisse/Secrets — `GITHUB_TOKEN`
@@ -317,9 +317,7 @@ Netzwerkanschluss (UM3, S3, S5, S7, Factor 4) bieten eine offizielle,
 direkt auf dem Drucker laufende lokale REST-API unter
 `http://<Drucker-IP>/api/v1/` (Swagger-Dokumentation dazu direkt am
 Drucker unter `http://<Drucker-IP>/docs/api/`). Fuer reine Status-
-Abfragen — alles, was dieses Dashboard macht — ist **kein Login/API-Key**
-noetig, das wird laut Ultimaker-Dokumentation nur fuer schreibende
-Aktionen (z. B. Druckauftrag starten) benoetigt.
+Abfragen ist **kein Login/API-Key** noetig.
 
 Angezeigt werden: Fortschritt (Balken + Zahl), aktuelle Datei inkl.
 verbleibender Restzeit, Duesen- und Betttemperatur. Ein Kamera-Icon
@@ -329,6 +327,71 @@ Hinzufuegen ueberschreibbar).
 
 Hinweis: Ultimaker-Desktopdrucker haben keinen Kammertemperatursensor,
 dieses Feld bleibt daher immer leer — das ist normal.
+
+### Druckauftrag per Drag & Drop senden (seit v1.6.3)
+
+Wie bei Bambu Lab (Abschnitt 4a) laesst sich eine fertig gesclicte
+Datei — hier eine **`.gcode`-Datei** (z. B. aus Cura exportiert, nicht
+"An Netzwerkdrucker senden" nutzen, sondern lokal als Datei speichern)
+— direkt auf die Drucker-Karte ziehen, um sie zum Drucker zu schicken
+und den Druck zu starten.
+
+**Einmalige Kopplung erforderlich:** Anders als bei Bambu Lab (dort
+reicht Access Code + Seriennummer) verlangt die Ultimaker-API fuer
+schreibende Aktionen (Datei hochladen, Druck starten) eine gesonderte
+**Kopplung** — vergleichbar mit einem Bluetooth-Pairing. Ist ein
+Ultimaker-Drucker noch nicht gekoppelt, zeigt die Karte statt der
+Ablage-Flaeche einen Button **"Jetzt koppeln"**:
+
+1. Klick auf "Jetzt koppeln" sendet eine Kopplungsanfrage an den
+   Drucker.
+2. **Am Display des Druckers erscheint eine Bestaetigungs-Abfrage** —
+   dort zustimmen (Name der Anwendung: "DruckerDashboard").
+3. Das Dashboard fragt danach automatisch alle paar Sekunden ab, ob
+   bestaetigt wurde (bis zu 2 Minuten Zeitfenster) und zeigt eine
+   Erfolgs- oder Fehlermeldung.
+4. Nach erfolgreicher Kopplung erscheint die normale Ablage-Flaeche,
+   und die Zugangsdaten werden dauerhaft in `config.json` gespeichert —
+   die Kopplung muss nur einmal pro Drucker durchgefuehrt werden, nicht
+   bei jedem Druck erneut.
+
+Wird die Kopplung am Display abgelehnt oder das Zeitfenster verpasst,
+kann der Vorgang jederzeit erneut gestartet werden.
+
+**Technischer Hintergrund:** Die Datei wird per HTTP **Digest-
+Authentifizierung** (RFC 2617) an `POST /api/v1/print_job` uebertragen —
+das im ersten Schritt erhaltene id/key-Paar dient dabei als
+Benutzername/Passwort. Die dafuer noetige Digest-Challenge (realm/nonce)
+wird direkt vom Ziel-Endpunkt (`/api/v1/print_job`, per leerer Vorab-
+Anfrage) angefordert — nicht ueber einen separaten Endpunkt, damit die
+Funktion auch mit Nachbauten/vereinfachten Implementierungen der
+Ultimaker-API funktioniert, die nicht zwingend jeden offiziell
+dokumentierten Nebenendpunkt bereitstellen. Der Druckstart erfolgt
+unmittelbar nach dem Hochladen; es gibt (anders als bei Bambu Lab) keine
+Material-Zuordnung zu bestaetigen, da Ultimaker-Drucker kein AMS-
+aehnliches Multi-Material-System haben. Fuer den Uploadfortschritt wird
+aktuell keine laufende Prozentanzeige angezeigt (die Ultimaker-API bietet
+dafuer keinen Zwischenstand) — die Ablage-Flaeche zeigt waehrend des
+Uploads lediglich einen "wird hochgeladen"-Zustand, gcode-Dateien sind
+aber in aller Regel deutlich kleiner als Bambus `.gcode.3mf`-Pakete und
+der Upload entsprechend schnell abgeschlossen.
+
+**Digest-Authentifizierung ist optional (seit v1.6.5):** Manche
+Nachbauten/vereinfachte Implementierungen der Ultimaker-API (z. B.
+eigene Heimprojekte) verlangen fuer den Druckstart selbst gar keine
+Authentifizierung, obwohl die Kopplung (Schritt 1-3 oben) technisch
+durchgefuehrt wird. Das Dashboard erkennt das automatisch: es fragt vor
+dem eigentlichen Upload kurz beim Drucker nach, ob eine Digest-
+Authentifizierung verlangt wird — falls ja, wird sie verwendet (fuer
+echte Ultimaker-Hardware zwingend erforderlich), falls nein, wird die
+Datei einfach ohne Anmeldedaten gesendet. Beide Faelle funktionieren
+automatisch, ohne dass eine Einstellung dafuer noetig ist.
+
+**Bekannte Einschraenkung:** In seltenen Faellen (insbesondere nach
+einem Firmware-Update auf sehr neue Versionen) kann die Kopplungsanfrage
+laut mehreren Community-Berichten fehlschlagen — betroffen war
+insbesondere Firmware 8.1 vor einem Patch. Tritt das auf, hilft meist
+ein Firmware-Update auf die neueste verfuegbare Version.
 
 ## 3g. Eigene Sensoren & Schaltflaechen per zweitem MQTT-Broker
 
@@ -526,10 +589,12 @@ Karten-Grid, das sich alle 2,5 Sekunden aktualisiert.
   selbst leer (ein bekanntes Slicer-Verhalten) — dann ignoriert die
   Druckerfirmware jede AMS-Zuordnung unabhaengig davon, was gesendet
   wird; das ist keine Einschraenkung dieses Programms.
-- Diese Funktion ist aktuell **nur fuer den Typ `bambu` verfuegbar**,
-  nicht fuer OctoPrint/Creality/Formlabs/Ultimaker (die haben eigene,
-  etablierte Wege fuer Druckauftraege, z. B. OctoPrint-Weboberflaeche
-  oder Moonraker/Fluidd/Mainsail).
+- Druckauftraege per Drag & Drop sind fuer die Typen **`bambu`** (mit
+  AMS-Zuordnung, siehe Abschnitt 4a) und **`ultimaker`** (mit
+  Kopplungs-Schritt, siehe Abschnitt 3f) verfuegbar — nicht fuer
+  OctoPrint/Creality/Formlabs (die haben eigene, etablierte Wege fuer
+  Druckauftraege, z. B. OctoPrint-Weboberflaeche oder Moonraker/Fluidd/
+  Mainsail).
 - **Bekannter Fall: Druck bleibt beim Materialladen haengen (behoben
   seit v1.5.6).** Datei-Upload und Druckstart liefen fehlerfrei, der
   Drucker blieb aber ohne jede Fehlermeldung beim Laden des Materials

@@ -36,7 +36,7 @@ Konfiguration:         config.json (liegt im selben Ordner wie das Skript
 # Release-Tag und Datei-Namen zu erzeugen. Bei jeder ausgelieferten
 # Aenderung hier erhoehen (siehe Abschnitt in UEBERGABE.md fuer die
 # Regeln, was Major/Minor/Patch bedeutet).
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.6.5"
 
 import os
 import sys
@@ -51,6 +51,9 @@ import uuid
 import tempfile
 import zipfile
 import ftplib
+import hashlib
+import secrets
+import re
 import subprocess
 import json
 import xml.etree.ElementTree as ET
@@ -1503,6 +1506,85 @@ class CrealityConnection:
 # ----------------------------------------------------------------------
 # Ultimaker (S-Serie, UM3) ueber die offizielle lokale Drucker-API
 # ----------------------------------------------------------------------
+
+def _parse_digest_challenge(header_value: str) -> dict:
+    """Parst einen "WWW-Authenticate: Digest ..."-Header (RFC 2617) in
+    ein Dict aus Schluessel/Wert-Paaren (u. a. realm, nonce, qop,
+    opaque, algorithm). Keine externe Bibliothek noetig - reines
+    Parsen einer kommagetrennten "schluessel=wert"-Liste, bei der Werte
+    optional in Anfuehrungszeichen stehen."""
+    parts = {}
+    body = header_value.split(" ", 1)[1] if " " in header_value else header_value
+    for match in re.finditer(r'(\w+)=("(?:[^"\\]|\\.)*"|[^,]*)', body):
+        key, val = match.group(1), match.group(2)
+        parts[key] = val.strip('"')
+    return parts
+
+
+def _build_digest_authorization(challenge: dict, username: str, password: str,
+                                 method: str, uri: str) -> str:
+    """Baut den Wert des Authorization-Headers (RFC 2617, MD5, optional
+    qop=auth) fuer eine Digest-authentifizierte Anfrage - anhand einer
+    zuvor per _parse_digest_challenge() erhaltenen Challenge. Reine
+    Python-Standardbibliothek (hashlib/secrets), keine externe
+    Digest-Auth-Bibliothek noetig."""
+    realm = challenge.get("realm", "")
+    nonce = challenge.get("nonce", "")
+    qop = challenge.get("qop", "")
+    opaque = challenge.get("opaque")
+    algorithm = challenge.get("algorithm") or "MD5"
+
+    ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
+    ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+    nc = "00000001"
+    cnonce = secrets.token_hex(8)
+
+    if qop:
+        # RFC 2617 qop=auth: response haengt zusaetzlich von nc/cnonce ab,
+        # um Replay-Angriffe zu erschweren.
+        response = hashlib.md5(
+            f"{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}".encode()
+        ).hexdigest()
+    else:
+        response = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
+
+    fields = [
+        f'username="{username}"', f'realm="{realm}"', f'nonce="{nonce}"',
+        f'uri="{uri}"', f'response="{response}"',
+    ]
+    if qop:
+        fields += [f'qop={qop}', f'nc={nc}', f'cnonce="{cnonce}"']
+    if opaque:
+        fields.append(f'opaque="{opaque}"')
+    if algorithm:
+        fields.append(f'algorithm={algorithm}')
+    return "Digest " + ", ".join(fields)
+
+
+def _build_multipart_body(boundary: str, fields: list, files: list) -> bytes:
+    """Baut den Rohkoerper einer multipart/form-data-Anfrage (RFC 7578)
+    von Hand zusammen - urllib (im Gegensatz zu z. B. der externen
+    requests-Bibliothek) hat dafuer keine eingebaute Unterstuetzung, und
+    fuer dieses eine Formular (ein Textfeld + eine Datei) lohnt sich
+    keine zusaetzliche Abhaengigkeit.
+    fields: Liste von (name, wert)-Tupeln (einfache Textfelder).
+    files: Liste von (name, dateiname, inhalt_bytes)-Tupeln."""
+    parts = []
+    for name, value in fields:
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+        )
+    for name, filename, content in files:
+        parts.append(
+            (f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; '
+             f'filename="{filename}"\r\nContent-Type: application/octet-stream\r\n\r\n').encode()
+        )
+        parts.append(content)
+        parts.append(b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    return b"".join(parts)
+
+
 class UltimakerConnection:
     """Bindet einen netzwerkfaehigen Ultimaker-Drucker (UM3, S3, S5, S7,
     Factor 4, ...) ueber dessen offizielle, direkt auf dem Drucker
@@ -1623,6 +1705,182 @@ class UltimakerConnection:
 
         self.status["last_update"] = datetime.now().strftime("%H:%M:%S")
 
+    # ------------------------------------------------------------------
+    # Druckauftrag per Drag & Drop (seit v1.6.3)
+    #
+    # Anders als die reinen Status-Abfragen oben verlangt die Ultimaker-
+    # API fuer schreibende Aktionen (Datei hochladen + Druck starten)
+    # eine Authentifizierung per HTTP Digest Auth mit einem id/key-Paar,
+    # das der Drucker erst nach BESTAETIGUNG AM EIGENEN DISPLAY ausgibt
+    # ("Kopplung", vergleichbar mit Bluetooth-Pairing) - siehe
+    # start_pairing()/check_pairing(). Quelle: offizielle Ultimaker-
+    # Swagger-Dokumentation (direkt am Drucker unter /docs/api/
+    # abrufbar) sowie mehrere unabhaengige Community-Threads im
+    # UltiMaker-Forum, die den Ablauf uebereinstimmend beschreiben -
+    # keine geratenen Endpunkte.
+    # ------------------------------------------------------------------
+    def start_pairing(self):
+        """Schritt 1 von 2 der Kopplung: fragt beim Drucker eine neue
+        id/key-Kombination an. Der Drucker zeigt danach am eigenen
+        Display eine Bestaetigungs-Abfrage - die Kombination ist erst
+        gueltig, nachdem der Nutzer dort zugestimmt hat (siehe
+        check_pairing()). "application"/"user" sind Pflichtfelder laut
+        Ultimaker-API (ohne sie: Fehler "application or user not
+        supplied") und werden nur am Drucker-Display angezeigt, damit
+        erkennbar ist, welche Anwendung um Zugriff bittet."""
+        body = urllib.parse.urlencode({
+            "application": "DruckerDashboard",
+            "user": "dashboard",
+        }).encode()
+        req = urllib.request.Request(
+            self._base_url() + "/api/v1/auth/request",
+            data=body, method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data["id"], data["key"]
+
+    def check_pairing(self, auth_id: str) -> str:
+        """Schritt 2: fragt ab, ob der Nutzer die Kopplungsanfrage am
+        Drucker-Display bereits bestaetigt (oder abgelehnt) hat. Liefert
+        den vom Drucker gemeldeten Status als String, typischerweise
+        "authorized", "unauthorized" oder ein Zwischenzustand, waehrend
+        noch niemand am Display reagiert hat."""
+        req = urllib.request.Request(
+            self._base_url() + f"/api/v1/auth/check/{auth_id}",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data.get("message", "unknown")
+
+    def _digest_challenge_or_none(self, timeout: float = 5.0):
+        """Versucht, ueber eine leere Anfrage (POST OHNE Datei) an das
+        eigentliche Ziel-Endpunkt (/api/v1/print_job) eine 401-Antwort
+        mit "WWW-Authenticate: Digest ..." zu erhalten. Liefert die
+        geparste Challenge (dict), oder **None**, falls der Drucker gar
+        keine Digest-Authentifizierung fuer Druckauftraege verlangt -
+        in dem Fall sendet send_print() den Upload ganz ohne
+        Authorization-Header.
+
+        Dadurch muss der eigentliche Datei-Upload nur EINMAL gesendet
+        werden (kein zweimaliges Senden wie bei generischen Digest-
+        Auth-Bibliotheken ueblich), UND die Implementierung funktioniert
+        sowohl mit echter Ultimaker-Hardware (verlangt zwingend Digest-
+        Auth) als auch mit vereinfachten Nachbauten der Ultimaker-API
+        (z. B. eigenen Heimprojekten), die den Druckstart bewusst OHNE
+        Authentifizierung implementieren - siehe UEBERGABE.md fuer den
+        konkreten Fall, der zu dieser Anpassung gefuehrt hat: dort
+        prueft der `/print_job`-Endpunkt lediglich, ob ein Datei-Feld
+        mitgeschickt wurde, aber keinerlei Anmeldedaten.
+
+        WICHTIG (v1.6.5 - Korrektur): Vorherige Versionen warfen bei
+        JEDER Antwort ausser 401 eine Exception, in der Annahme, jeder
+        Ultimaker-kompatible Drucker wuerde zwingend Digest-Auth
+        verlangen. Das war zu strikt - eine 400-Antwort (wie beim oben
+        beschriebenen Nachbau, dessen /print_job-Handler die leere
+        Probe-Anfrage schlicht als "keine Datei mitgeschickt" ablehnt,
+        OHNE ueberhaupt eine Authentifizierungspruefung zu erreichen)
+        bedeutet nicht zwangslaeufig einen Fehler - es kann schlicht
+        heissen, dass keine Authentifizierung noetig ist."""
+        req = urllib.request.Request(
+            self._base_url() + "/api/v1/print_job",
+            data=b"", method="POST",
+            headers={"Accept": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=timeout)
+            # Akzeptierte sogar die leere Anfrage klaglos -> definitiv
+            # keine Authentifizierung noetig.
+            return None
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                www_auth = e.headers.get("WWW-Authenticate", "")
+                if www_auth.lower().startswith("digest"):
+                    return _parse_digest_challenge(www_auth)
+                raise RuntimeError(f"Unerwartetes Authentifizierungsschema vom Drucker: {www_auth!r}") from e
+            # Jede andere Fehlerantwort (z. B. 400 "kein Datei-Feld
+            # gefunden") deutet darauf hin, dass der Endpunkt ueberhaupt
+            # keine Authentifizierung prueft - der Fehler kommt allein
+            # daher, dass die Probe-Anfrage absichtlich keine Datei
+            # mitschickt. In dem Fall wird ohne Anmeldedaten gesendet;
+            # sollte das tatsaechlich falsch sein, meldet der spaetere
+            # echte Upload-Versuch das ueber einen klaren 401-Fehler
+            # (siehe send_print()).
+            return None
+
+    def send_print(self, local_path: str, job_name: str, on_progress=None):
+        """Laedt local_path (eine fertig gesclicte .gcode-Datei, z. B.
+        aus Cura exportiert) per POST an /api/v1/print_job hoch und
+        startet den Druck - mit Digest-Authentifizierung, falls der
+        Drucker das verlangt (siehe _digest_challenge_or_none()), sonst
+        ohne. Setzt eine vorherige erfolgreiche Kopplung voraus
+        (self.cfg["ultimaker_auth_id"]/["ultimaker_auth_key"], siehe
+        start_pairing()/check_pairing()) - die Zugangsdaten werden nur
+        dann tatsaechlich mitgesendet, wenn der Drucker ueberhaupt
+        Digest-Auth verlangt. on_progress(sent, total) wird nur einmal
+        am Ende aufgerufen (kein granulares Fortschritts-Feedback
+        waehrend des Uploads - die Ultimaker-API bietet dafuer keinen
+        Hook, und gcode-Dateien sind i. d. R. deutlich kleiner als
+        Bambu-3mf-Pakete, sodass der Upload meist ohnehin schnell
+        abgeschlossen ist)."""
+        auth_id = self.cfg.get("ultimaker_auth_id")
+        auth_key = self.cfg.get("ultimaker_auth_key")
+        if not auth_id or not auth_key:
+            raise RuntimeError(
+                "Dieser Ultimaker ist noch nicht mit dem Dashboard gekoppelt - "
+                "bitte zuerst ueber den Button \"Jetzt koppeln\" koppeln und "
+                "die Anfrage am Drucker-Display bestaetigen."
+            )
+
+        total_size = os.path.getsize(local_path)
+        challenge = self._digest_challenge_or_none()
+        uri = "/api/v1/print_job"
+
+        boundary = uuid.uuid4().hex
+        with open(local_path, "rb") as f:
+            file_bytes = f.read()
+        body = _build_multipart_body(
+            boundary,
+            fields=[("jobname", job_name)],
+            files=[("file", os.path.basename(local_path), file_bytes)],
+        )
+
+        headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Accept": "application/json",
+        }
+        if challenge is not None:
+            headers["Authorization"] = _build_digest_authorization(challenge, auth_id, auth_key, "POST", uri)
+
+        req = urllib.request.Request(
+            self._base_url() + uri, data=body, method="POST", headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+            if e.code == 401:
+                raise RuntimeError(
+                    "Der Drucker hat die gespeicherten Zugangsdaten abgelehnt "
+                    "(HTTP 401) - die Kopplung wurde vermutlich am Drucker "
+                    "zurueckgesetzt. Bitte erneut koppeln."
+                ) from e
+            raise RuntimeError(
+                f"Drucker lehnte den Druckauftrag ab (HTTP {e.code})"
+                f"{': ' + detail if detail else ''}."
+            ) from e
+
+        if on_progress:
+            on_progress(total_size, total_size)
+
 
 # ----------------------------------------------------------------------
 # Zweiter, unabhaengiger MQTT-Broker fuer frei definierbare Sensoren
@@ -1729,6 +1987,11 @@ class DashboardApp:
         self._print_jobs_lock = threading.Lock()
         self._print_progress = {}      # job_id -> {phase, sent, total, percent, error, ams}
         self._print_progress_lock = threading.Lock()
+        # printer_id -> (auth_id, auth_key, gestartet_um) - siehe
+        # start_ultimaker_pairing()/check_ultimaker_pairing(). Nur
+        # WAEHREND einer laufenden Kopplung befuellt, danach entfernt
+        # (erfolgreich: id/key wandern dauerhaft in config.json).
+        self._ultimaker_pending_auth = {}
 
     def _start_printer(self, printer_cfg: dict):
         ptype = printer_cfg.get("type", "bambu")
@@ -1827,6 +2090,8 @@ class DashboardApp:
             }
             item.update(conn.status if conn else {})
             item["extras"] = self._resolve_extras(p)
+            if p.get("type") == "ultimaker":
+                item["ultimaker_paired"] = bool(p.get("ultimaker_auth_id") and p.get("ultimaker_auth_key"))
             out.append(item)
         return out
 
@@ -1970,6 +2235,116 @@ class DashboardApp:
             os.rmdir(os.path.dirname(job["local_path"]))
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Ultimaker: Kopplung ("Pairing") und Druckauftrag per Drag & Drop
+    # (seit v1.6.3) - siehe UltimakerConnection.start_pairing()/
+    # check_pairing()/send_print() fuer den technischen Hintergrund.
+    # ------------------------------------------------------------------
+    def start_ultimaker_pairing(self, printer_id):
+        p = self.get_printer_cfg(printer_id)
+        if not p or p.get("type") != "ultimaker":
+            return False, "Kein Ultimaker-Drucker mit dieser ID gefunden."
+        conn = self.connections.get(printer_id)
+        if not conn:
+            return False, "Keine Verbindung zu diesem Drucker."
+        try:
+            auth_id, auth_key = conn.start_pairing()
+        except Exception as e:
+            return False, f"Kopplungsanfrage fehlgeschlagen: {e}"
+        self._ultimaker_pending_auth[printer_id] = (auth_id, auth_key, time.time())
+        return True, None
+
+    def check_ultimaker_pairing(self, printer_id):
+        """Wird vom Frontend wiederholt abgefragt (Polling), waehrend
+        auf die Bestaetigung am Drucker-Display gewartet wird. Liefert
+        "pending" (weiter warten), "authorized" (Kopplung erfolgreich -
+        id/key wurden bereits dauerhaft in config.json gespeichert) oder
+        "unauthorized" (am Display abgelehnt)."""
+        pending = self._ultimaker_pending_auth.get(printer_id)
+        if not pending:
+            return False, "Keine laufende Kopplungsanfrage fuer diesen Drucker.", None
+        auth_id, auth_key, started_at = pending
+        if time.time() - started_at > 120:
+            self._ultimaker_pending_auth.pop(printer_id, None)
+            return False, ("Kopplungsanfrage abgelaufen (keine Bestaetigung am Display "
+                            "innerhalb von 2 Minuten) - bitte erneut versuchen."), None
+        conn = self.connections.get(printer_id)
+        if not conn:
+            self._ultimaker_pending_auth.pop(printer_id, None)
+            return False, "Keine Verbindung mehr zu diesem Drucker.", None
+        try:
+            status = conn.check_pairing(auth_id)
+        except Exception as e:
+            return False, f"Fehler beim Pruefen der Kopplung: {e}", None
+
+        if status == "authorized":
+            self._ultimaker_pending_auth.pop(printer_id, None)
+            p = self.get_printer_cfg(printer_id)
+            if p is not None:
+                p["ultimaker_auth_id"] = auth_id
+                p["ultimaker_auth_key"] = auth_key
+                save_config(self.cfg)
+            return True, None, "authorized"
+        if status == "unauthorized":
+            self._ultimaker_pending_auth.pop(printer_id, None)
+            return True, None, "unauthorized"
+        return True, None, "pending"
+
+    def send_ultimaker_print_now(self, printer_id, local_path, filename):
+        """Anders als bei Bambu (siehe prepare_print_job()/
+        start_confirm_print_job()) gibt es bei Ultimaker keine AMS-
+        Zuordnung zu bestaetigen - der Druck wird deshalb SOFORT nach
+        dem Hochladen der Datei ins Dashboard gestartet, ohne
+        Zwischenschritt. Nutzt dieselben _print_jobs/_print_progress-
+        Strukturen wie Bambu weiter, damit das Frontend denselben
+        generischen Polling-Endpunkt (/print/progress/<job_id>)
+        verwenden kann."""
+        p = self.get_printer_cfg(printer_id)
+        if not p:
+            return False, "Drucker nicht gefunden.", None
+        if p.get("type") != "ultimaker":
+            return False, "Diese Funktion ist nur fuer Ultimaker-Drucker verfuegbar.", None
+        if not (p.get("ultimaker_auth_id") and p.get("ultimaker_auth_key")):
+            return False, ("Dieser Ultimaker ist noch nicht mit dem Dashboard gekoppelt - "
+                            "bitte zuerst koppeln."), None
+        conn = self.connections.get(printer_id)
+        if not conn:
+            return False, "Keine Verbindung zu diesem Drucker.", None
+
+        try:
+            total_size = os.path.getsize(local_path)
+        except OSError:
+            return False, "Hochgeladene Datei nicht gefunden.", None
+
+        with self._print_jobs_lock:
+            self._purge_stale_print_jobs()
+            job_id = uuid.uuid4().hex
+            self._print_jobs[job_id] = {
+                "local_path": local_path,
+                "remote_name": filename,
+                "printer_id": printer_id,
+                "created": time.time(),
+            }
+
+        self._set_progress(job_id, phase="uploading", sent=0, total=total_size, percent=0, error=None)
+
+        def worker():
+            def on_progress(sent, total):
+                percent = int(sent * 100 / total) if total else 0
+                self._set_progress(job_id, phase="uploading", sent=sent, total=total, percent=percent)
+            try:
+                conn.send_print(local_path, filename, on_progress=on_progress)
+                self._set_progress(job_id, phase="done", sent=total_size, total=total_size, percent=100)
+                with self._print_jobs_lock:
+                    job = self._print_jobs.pop(job_id, None)
+                if job:
+                    self._cleanup_job_file(job)
+            except Exception as e:
+                self._set_progress(job_id, phase="error", error=str(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True, None, job_id
 
 
 dash = DashboardApp()
@@ -2170,6 +2545,62 @@ def api_print_cancel(printer_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/printers/<printer_id>/ultimaker/pair/start", methods=["POST"])
+def api_ultimaker_pair_start(printer_id):
+    """Schritt 1 der Ultimaker-Kopplung: fordert beim Drucker eine neue
+    id/key-Kombination an. Der Drucker zeigt danach am eigenen Display
+    eine Bestaetigungs-Abfrage - das Frontend muss danach wiederholt
+    /ultimaker/pair/status abfragen, bis der Nutzer dort reagiert hat."""
+    ok, err = dash.start_ultimaker_pairing(printer_id)
+    if not ok:
+        return jsonify({"error": err}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/printers/<printer_id>/ultimaker/pair/status", methods=["GET"])
+def api_ultimaker_pair_status(printer_id):
+    """Wird vom Frontend gepollt, waehrend auf die Bestaetigung am
+    Drucker-Display gewartet wird. status: "pending" | "authorized" |
+    "unauthorized"."""
+    ok, err, status = dash.check_ultimaker_pairing(printer_id)
+    if not ok:
+        return jsonify({"error": err}), 400
+    return jsonify({"status": status})
+
+
+@app.route("/api/printers/<printer_id>/ultimaker/print", methods=["POST"])
+def api_ultimaker_print(printer_id):
+    """Nimmt eine fertig gesclicte .gcode-Datei entgegen (z. B. Export
+    aus Cura) und startet den Druck SOFORT (keine Zuordnung wie bei
+    Bambus AMS-Dialog noetig). Der Fortschritt wird ueber denselben
+    generischen Endpunkt wie bei Bambu abgefragt: GET
+    /api/printers/<id>/print/progress/<job_id>."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"error": "Keine Datei erhalten."}), 400
+
+    filename = secure_filename(f.filename)
+    if not filename.lower().endswith(".gcode"):
+        return jsonify({
+            "error": "Nur fertig gesclicte .gcode-Dateien werden unterstuetzt (Export aus Cura)."
+        }), 400
+
+    tmp_dir = tempfile.mkdtemp(prefix="dashboard-print-")
+    tmp_path = os.path.join(tmp_dir, filename)
+    f.save(tmp_path)
+
+    ok, err, job_id = dash.send_ultimaker_print_now(printer_id, tmp_path, filename)
+    if not ok:
+        try:
+            os.remove(tmp_path)
+            os.rmdir(tmp_dir)
+        except Exception:
+            pass
+        return jsonify({"error": err}), 400
+
+    return jsonify({"ok": True, "job_id": job_id})
+
+
 @app.route("/api/version", methods=["GET"])
 def api_version():
     return jsonify({"version": APP_VERSION})
@@ -2350,6 +2781,10 @@ INDEX_HTML = r"""
   }
   .drop-zone.dragover{ border-color:var(--accent-2); background:#132018; color:var(--text); }
   .drop-zone.uploading{ border-color:var(--accent); color:var(--text); }
+  .drop-zone.dz-disabled{
+    cursor:default; border-style:solid; background:#1b2027;
+  }
+  .drop-zone.dz-disabled .btn-mini{ margin-top:6px; }
   .drop-zone .dz-hint{ font-size:10.5px; margin-top:4px; color:var(--text-dim); }
   .drop-zone .dz-status{
     font-family:var(--mono); font-size:11.5px; margin-top:8px;
@@ -3271,12 +3706,136 @@ function renderUltimakerCard(p){
           ${p.error ? `<div class="error-hint">${p.error}</div>` : ''}
         </div>
         <div>
-          <div class="field-label">Hinweis</div>
-          <div class="hint-text" style="margin:0;">Ultimaker-Desktopdrucker haben keinen Kammertemperatursensor.</div>
+          <div class="field-label">Druckauftrag senden</div>
+          ${renderUltimakerDropZone(p.id, !!p.ultimaker_paired)}
+          <div class="hint-text" style="margin-top:8px;">Ultimaker-Desktopdrucker haben keinen Kammertemperatursensor.</div>
         </div>
       </div>
       ${renderExtras(p.id, p.extras)}
     </div>`;
+}
+
+function renderUltimakerDropZone(printerId, paired){
+  if(!paired){
+    return `
+      <div class="drop-zone dz-disabled">
+        Kopplung mit dem Drucker erforderlich, bevor Druckauftraege
+        gesendet werden koennen.
+        <div class="dz-hint">
+          <button type="button" class="btn-mini" onclick="pairUltimaker('${printerId}')">Jetzt koppeln</button>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="drop-zone" id="dz-${printerId}"
+         ondragover="dzDragOver(event)"
+         ondragleave="dzDragLeave(event)"
+         ondrop="dzDropUltimaker(event,'${printerId}')">
+      Fertig gesclicte .gcode-Datei hier ablegen zum Drucken
+      <div class="dz-hint">Export aus Cura, z. B. ueber "Datei speichern"</div>
+    </div>`;
+}
+
+async function pairUltimaker(printerId){
+  showToast('Kopplungsanfrage gesendet - bitte am Drucker-Display bestaetigen...', 'ok');
+  try{
+    const res = await fetch('/api/printers/' + printerId + '/ultimaker/pair/start', { method: 'POST' });
+    const data = await res.json();
+    if(!res.ok){
+      showToast(data.error || 'Kopplungsanfrage fehlgeschlagen.', 'err');
+      return;
+    }
+  } catch(e){
+    showToast('Netzwerkfehler bei der Kopplungsanfrage.', 'err');
+    return;
+  }
+
+  // Server-seitiges Zeitlimit liegt bei 120s - hier etwas grosszuegiger,
+  // damit ein knapp verpasster letzter Poll nicht faelschlich als
+  // Netzwerkfehler statt als Ablauf gemeldet wird.
+  const deadline = Date.now() + 130000;
+  while(Date.now() < deadline){
+    await new Promise(r => setTimeout(r, 2000));
+    try{
+      const res = await fetch('/api/printers/' + printerId + '/ultimaker/pair/status');
+      const data = await res.json();
+      if(!res.ok){
+        showToast(data.error || 'Kopplung fehlgeschlagen.', 'err');
+        return;
+      }
+      if(data.status === 'authorized'){
+        showToast('Kopplung erfolgreich - Druckauftraege koennen jetzt gesendet werden.', 'ok');
+        refresh();
+        return;
+      }
+      if(data.status === 'unauthorized'){
+        showToast('Kopplung am Drucker-Display abgelehnt.', 'err');
+        return;
+      }
+      // status === 'pending' -> weiter warten
+    } catch(e){
+      showToast('Netzwerkfehler beim Pruefen der Kopplung.', 'err');
+      return;
+    }
+  }
+  showToast('Kopplung abgelaufen (keine Bestaetigung am Display) - bitte erneut versuchen.', 'err');
+}
+
+async function dzDropUltimaker(ev, printerId){
+  ev.preventDefault();
+  const zone = ev.currentTarget;
+  zone.classList.remove('dragover');
+  const files = ev.dataTransfer.files;
+  if(!files || files.length === 0) return;
+  const file = files[0];
+
+  if(!file.name.toLowerCase().endsWith('.gcode')){
+    showToast('Nur fertig gesclicte .gcode-Dateien werden unterstuetzt.', 'err');
+    return;
+  }
+
+  zone.classList.add('uploading');
+  const form = new FormData();
+  form.append('file', file);
+  let jobId = null;
+  try{
+    const res = await fetch('/api/printers/' + printerId + '/ultimaker/print', { method: 'POST', body: form });
+    const data = await res.json();
+    if(!res.ok){
+      showToast(data.error || 'Fehler beim Senden des Druckauftrags.', 'err');
+      zone.classList.remove('uploading');
+      return;
+    }
+    jobId = data.job_id;
+  } catch(e){
+    showToast('Netzwerkfehler beim Hochladen.', 'err');
+    zone.classList.remove('uploading');
+    return;
+  }
+  await pollUltimakerProgress(printerId, jobId, zone);
+}
+
+async function pollUltimakerProgress(printerId, jobId, zone){
+  while(true){
+    await new Promise(r => setTimeout(r, 400));
+    let data;
+    try{
+      const res = await fetch('/api/printers/' + printerId + '/print/progress/' + jobId);
+      if(!res.ok) break;
+      data = await res.json();
+    } catch(e){
+      break;
+    }
+    if(data.phase === 'error'){
+      showToast(data.error || 'Fehler beim Senden des Druckauftrags.', 'err');
+      break;
+    }
+    if(data.phase === 'done'){
+      showToast('Druckauftrag gesendet.', 'ok');
+      break;
+    }
+  }
+  zone.classList.remove('uploading');
 }
 
 function renderFormlabsCard(p){

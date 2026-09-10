@@ -72,6 +72,7 @@ nötig, keine externen Template-/Static-Ordner).
 | Default-Konfiguration | `DEFAULT_CONFIG = {` |
 | Verbindungsklassen | `class PrinterConnection`, `class FormlabsLocalApiConnection`, `class OctoPrintConnection`, `class CrealityConnection`, `class UltimakerConnection`, `class ExtrasMqttManager` |
 | Druckauftrag senden (Bambu) | `PrinterConnection.preview_print()`, `PrinterConnection.send_print()`, `PrinterConnection._request_print()`, `PrinterConnection.pause_mqtt()`/`resume_mqtt()`/`wait_for_mqtt_reconnect()`, `class ImplicitFtpTls`, `FTPS_PROFILES`, `_find_ftps_upload_helper()`, `ftps_upload_helper.py` (separate Datei/exe, eigenes `PROFILES`-Dict), `_run_ftps_upload_worker()` + Sentinel-Check `--ftps-upload-worker` (Fallback, ganz frueh im Modul), `DashboardApp.add_printer()` (Parameter `bambu_family`), `DashboardApp.prepare_print_job()`/`start_confirm_print_job()`/`cancel_print_job()`/`get_print_progress()`, Routen `POST /api/printers` (Feld `bambu_family`)/`POST /api/printers/<id>/print/prepare`\|`/confirm`, `GET .../print/progress/<job_id>`, `POST .../print/cancel`, JS `renderDropZone()`/`dzDrop()`/`openAmsModal()`/`confirmAmsModal()`/`pollAmsProgress()`/`submitAdd()` (Feld `f_bambu_family`) |
+| Druckauftrag senden (Ultimaker, seit v1.6.3) | `_parse_digest_challenge()`, `_build_digest_authorization()`, `_build_multipart_body()`, `UltimakerConnection.start_pairing()`/`check_pairing()`/`_digest_challenge()`/`send_print()`, `DashboardApp.start_ultimaker_pairing()`/`check_ultimaker_pairing()`/`send_ultimaker_print_now()` (nutzt dieselben `_print_jobs`/`_print_progress`-Strukturen wie Bambu weiter), Routen `POST /api/printers/<id>/ultimaker/pair/start`\|`/pair/status`\|`POST .../ultimaker/print` (nutzt die BESTEHENDEN generischen `GET .../print/progress/<job_id>`-Routen weiter, keine eigenen noetig), JS `renderUltimakerDropZone()`/`pairUltimaker()`/`dzDropUltimaker()`/`pollUltimakerProgress()` |
 | AMS-Zuordnungsvorschlag | `PrinterConnection.preview_print()` (liefert `total_filaments`), `_parse_3mf_filaments()` (liefert `(filamente, gesamtanzahl)`), `_parse_plate1_used_filament_indices()`, `_find_matching_tray()`, `_types_compatible()`, `_slot_to_flat_index()`, JS `openAmsModal()`/`amsRowHtml()` (`data-true-index`)/`confirmAmsModal()` (baut `ams_mapping` an den echten Filament-Positionen, nicht Anzeige-Reihenfolge) |
 | Versionsnummer | `APP_VERSION` (ganz oben in `app.py`), Route `GET /api/version`, `.github/workflows/build-exe.yml` (liest die Version per Regex aus) |
 | Orchestrierung | `class DashboardApp` |
@@ -92,7 +93,7 @@ nötig, keine externen Template-/Static-Ordner).
 | `formlabs_cure` | Form Cure L | wie `formlabs`, andere Labels | Nein | Nein |
 | `octoprint` | Beliebiger Drucker mit OctoPrint | REST-API, `/api/printer`, `/api/job` | **API-Key Pflicht** | Ja, mjpg-streamer-Standard-URL (überschreibbar) |
 | `creality_k1`, `creality_k1c`, `creality_k1max`, `creality_k1se`, `creality_other` | Creality Klipper-Drucker | Moonraker-API, Port 7125 | Optional (meist LAN-trusted) | Ja, Crowsnest-Standard-URL (überschreibbar) |
-| `ultimaker` | Ultimaker UM3/S-Serie/Factor 4 | offizielle lokale REST-API `/api/v1/` | Nein (nur lesend) | Ja, mjpg-streamer-Standard-URL (überschreibbar) |
+| `ultimaker` | Ultimaker UM3/S-Serie/Factor 4 | offizielle lokale REST-API `/api/v1/` | Nein fuer Status (nur lesend); Digest-Auth-Kopplung fuer Druckstart (seit v1.6.3) | Ja, mjpg-streamer-Standard-URL (überschreibbar) |
 
 **Wichtiges Architekturprinzip:** Die 5 `creality_*`-Typen und die 3
 `formlabs_*`-Typen nutzen **jeweils dieselbe Connection-Klasse** – der
@@ -1443,6 +1444,315 @@ daher meist, nur den Type-Tuple und die Frontend-Labels zu erweitern,
   Vergleich (Bambu Studio vs. unser Dashboard fuer denselben Mehrfarb-
   Druckauftrag) der praeziseste naechste Schritt, um das exakte, vom
   Drucker erwartete Array-Format zu verifizieren.
+
+  **v1.6.3 - NEUES FEATURE (kein Bugfix): Druckauftrag per Drag & Drop
+  jetzt auch fuer Ultimaker-Drucker.** Auf Nutzerwunsch erweitert: analog
+  zu Bambu Lab (Abschnitt "Bambu Lab: Druckauftrag...") koennen jetzt
+  auch fertig gesclicte `.gcode`-Dateien (Cura-Export) per Drag & Drop
+  auf die Ultimaker-Karte gezogen werden, um den Druck zu starten.
+  **Wesentlicher Unterschied zu Bambu:** die Ultimaker-API verlangt fuer
+  schreibende Aktionen (Datei-Upload, Druckstart) zusaetzlich zur reinen
+  Statusabfrage eine gesonderte **Kopplung** (id/key-Paar), die der
+  Drucker erst nach Bestaetigung AM EIGENEN DISPLAY ausgibt - vergleichbar
+  mit Bluetooth-Pairing. Diese Kopplung ist einmalig pro Drucker noetig
+  (Zugangsdaten werden dauerhaft in `config.json` gespeichert), nicht bei
+  jedem Druck erneut.
+  **Recherche (offizielle Ultimaker-Swagger-Doku + mehrere unabhaengige
+  UltiMaker-Forum-Threads, konsistent beschrieben - keine geratenen
+  Endpunkte):**
+  - Kopplung: `POST /api/v1/auth/request` (Pflichtfelder `application`/
+    `user`, sonst Fehler "application or user not supplied") liefert
+    sofort ein `id`/`key`-Paar zurueck - dieses ist aber erst gueltig,
+    NACHDEM der Nutzer eine am Drucker-Display erscheinende
+    Bestaetigungs-Abfrage angenommen hat. Der Status wird per
+    `GET /api/v1/auth/check/{id}` abgefragt (Polling), bis `"authorized"`
+    oder `"unauthorized"` zurueckkommt.
+  - Druckauftrag: `POST /api/v1/print_job` (multipart/form-data, Felder
+    `file` + `jobname`), authentifiziert per **HTTP Digest Auth** (RFC
+    2617) mit dem id/key-Paar als Benutzername/Passwort.
+  - Bekannte Einschraenkung aus der Recherche: Firmware 8.1 hatte einen
+    dokumentierten Bug, der `/auth/request` voruebergehend unbrauchbar
+    machte (spaeter gepatcht) - als Hinweis in der README aufgenommen,
+    kein Workaround im Code noetig (betrifft nur veraltete Firmware).
+  **Implementierte Aenderung:**
+  - Neue Modul-Funktionen `_parse_digest_challenge()` (parst einen
+    `WWW-Authenticate: Digest ...`-Header), `_build_digest_authorization()`
+    (baut den `Authorization`-Header nach RFC 2617, MD5, qop=auth, reine
+    `hashlib`/`secrets`-Standardbibliothek, keine externe Digest-Auth-
+    Bibliothek) und `_build_multipart_body()` (manueller multipart/
+    form-data-Aufbau, da `urllib` dafuer keine eingebaute Unterstuetzung
+    hat und sich fuer dieses eine Formular keine zusaetzliche
+    Abhaengigkeit lohnt).
+  - **Bewusste Design-Entscheidung gegen Pythons eingebauten
+    `urllib.request.HTTPDigestAuthHandler`:** dieser wuerde bei jeder
+    Anfrage zwingend ZWEI Round-Trips brauchen (erst unauthentifiziert
+    -> 401, dann erneut MIT Anmeldedaten) - bei einem potenziell
+    mehrere MB grossen `.gcode`-Upload wuerde die Datei dabei zweimal
+    uebertragen. Stattdessen: `UltimakerConnection._digest_challenge()`
+    loest die 401-Challenge ueber den bewusst LEICHTEN Endpunkt
+    `/api/v1/auth/verify` aus (keine Datei-Uebertragung), danach wird
+    der eigentliche Upload mit bereits fertig berechnetem
+    `Authorization`-Header nur EINMAL gesendet.
+  - `UltimakerConnection.start_pairing()`/`check_pairing()`/`send_print()`
+    - neue Methoden, analog zur Struktur von `PrinterConnection` bei
+    Bambu, aber deutlich einfacher (kein AMS-Aequivalent, kein FTPS,
+    keine Profile/Alternierung noetig).
+  - `DashboardApp.__init__()`: neues `self._ultimaker_pending_auth`-Dict
+    (`printer_id -> (auth_id, auth_key, gestartet_um)`) fuer laufende,
+    noch nicht bestaetigte Kopplungsanfragen - NUR waehrend einer
+    laufenden Kopplung befuellt, danach entfernt (bei Erfolg wandern
+    id/key dauerhaft in `config.json`, siehe `get_printer_cfg()` +
+    `save_config()`; bei Fehlschlag/Timeout [2 Minuten] wird der Eintrag
+    verworfen).
+  - `DashboardApp.start_ultimaker_pairing()`/`check_ultimaker_pairing()`/
+    `send_ultimaker_print_now()` - orchestrieren Kopplung bzw.
+    Druckauftrag. **Wichtig:** `send_ultimaker_print_now()` startet den
+    Druck SOFORT nach dem Hochladen (kein zweistufiger prepare/confirm-
+    Ablauf wie bei Bambu noetig, da keine AMS-Zuordnung zu bestaetigen
+    ist) - nutzt aber dieselben `_print_jobs`/`_print_progress`-
+    Strukturen weiter, sodass die BESTEHENDEN generischen Routen
+    `GET /print/progress/<job_id>` unveraendert wiederverwendet werden
+    koennen (keine neuen Progress-/Cancel-Routen noetig).
+  - Drei neue Flask-Routen: `POST /api/printers/<id>/ultimaker/pair/start`,
+    `GET .../ultimaker/pair/status`, `POST .../ultimaker/print`.
+  - `DashboardApp.all_status()`: liefert zusaetzlich `ultimaker_paired`
+    (bool) fuer Drucker vom Typ `ultimaker`, damit das Frontend weiss,
+    ob die Ablage-Flaeche oder der Kopplungs-Button angezeigt werden soll.
+  - Frontend: `renderUltimakerDropZone()` (zeigt je nach `ultimaker_paired`
+    entweder die Ablage-Flaeche oder einen "Jetzt koppeln"-Button),
+    `pairUltimaker()` (startet Kopplung, pollt Status alle 2s bis zu
+    130s), `dzDropUltimaker()` (validiert `.gcode`-Endung, laedt hoch),
+    `pollUltimakerProgress()` (pollt denselben generischen Progress-
+    Endpunkt wie Bambu, zeigt Toast bei `done`/`error`). Neue CSS-Klasse
+    `.drop-zone.dz-disabled` fuer den ungekoppelten Zustand; `.btn-mini`
+    (bereits vorhanden) fuer den Kopplungs-Button wiederverwendet.
+  **Bewusste Vereinfachung:** kein granulares Fortschritts-Feedback
+  waehrend des Uploads (die Ultimaker-API bietet dafuer keinen Hook wie
+  Bambus FTPS-Callback) - die Ablage-Flaeche zeigt nur einen "wird
+  hochgeladen"-Zustand ohne Prozentanzeige. Da gcode-Dateien i. d. R.
+  deutlich kleiner als Bambus `.gcode.3mf`-Pakete sind, wurde das als
+  akzeptabler Scope-Kompromiss bewertet, nicht als fehlende Funktion.
+  **Getestet (ohne echten Drucker, aber ungewoehnlich gruendlich fuer
+  ein neues Feature):**
+  - `_parse_digest_challenge()`/`_build_digest_authorization()` isoliert
+    getestet UND die berechnete Response-Hash-Kette manuell (per Hand
+    nachgerechnetem MD5) gegen RFC 2617 verifiziert - nicht nur auf
+    "sieht plausibel aus" geprueft.
+  - `_build_multipart_body()` isoliert auf korrekte Struktur getestet.
+  - `UltimakerConnection.send_print()` gegen einen ECHTEN, selbst
+    geschriebenen `http.server.HTTPServer`-Testserver getestet, der die
+    Digest-Antwort SERVERSEITIG selbst nachrechnet und nur bei
+    korrekter Signatur akzeptiert - eine deutlich staerkere Verifikation
+    als ein reiner Client-seitiger Test, da sie beweist, dass ein
+    echter, unabhaengiger RFC-2617-Digest-Server die Anfrage als gueltig
+    akzeptieren wuerde.
+  - `start_pairing()`/`check_pairing()` gegen einen simulierten Server
+    getestet (korrekte Felder gesendet, Antwort korrekt verarbeitet).
+  - Alle drei neuen Flask-Routen end-to-end getestet: erfolgreiche
+    Kopplung inkl. Persistierung in `config.json` und `ultimaker_paired`-
+    Statusanzeige; vollstaendiger Druckauftrag-Flow von der Upload-Route
+    bis zum digest-authentifizierten `send_print()`-Aufruf (wieder gegen
+    den echten Test-HTTP-Server); alle Fehlerfaelle (falsche Datei-
+    endung, fehlende Kopplung, fehlende Datei, Kopplungsstatus ohne
+    laufende Anfrage, abgelaufene Kopplungsanfrage inkl. korrektem
+    Aufraeumen).
+  - Vollstaendiger Regressionstest mit gemischten Druckertypen
+    (Bambu + Ultimaker gleichzeitig) bestaetigt keine gegenseitige
+    Beeintraechtigung; `ultimaker_paired`-Feld erscheint korrekt NUR bei
+    Ultimaker-Druckern, nicht bei anderen Typen.
+  **Ein Test gegen einen echten Ultimaker-Drucker (inkl. der Display-
+  Bestaetigung) konnte in dieser Umgebung nicht durchgefuehrt werden** -
+  Bestaetigung durch den Nutzer stand zum Zeitpunkt dieser Übergabe noch
+  aus. Die Implementierung folgt aber sehr genau der offiziellen, von
+  mehreren unabhaengigen Quellen konsistent bestaetigten API-Dokumentation
+  und wurde (soweit ohne echten Drucker moeglich) ungewoehnlich gruendlich
+  gegen einen echten, unabhaengigen Digest-Auth-Server verifiziert.
+  **Fuer die Weiterarbeit, falls beim ersten echten Test Probleme
+  auftreten:**
+  1. Falls die Kopplungsanfrage selbst fehlschlaegt (schon Schritt 1):
+     Firmware-Version pruefen - Firmware 8.1 (vor einem Patch) hatte
+     laut Recherche einen bekannten Bug bei `/auth/request`.
+  2. Falls die Kopplung gelingt, der Druckstart aber mit HTTP 401
+     scheitert: moeglicherweise erwartet die konkrete Firmware-Version
+     ein anderes `algorithm`-Feld oder eine andere qop-Variante als
+     `auth` (z. B. `auth-int`, das den Nachrichtenkoerper mit in den
+     Hash einbezieht) - dann muesste `_build_digest_authorization()`
+     um diese Variante ergaenzt werden.
+  3. Falls "No file received" trotz korrekter Digest-Auth auftritt
+     (ein in der Recherche gefundenes, von mehreren Nutzern unabhaengig
+     berichtetes Symptom bei multipart-Uploads): den exakten Aufbau des
+     multipart-Bodys mit einem Netzwerk-Mitschnitt (Wireshark) gegen
+     einen erfolgreichen curl-Aufruf vergleichen - moeglicherweise
+     erwartet die Firmware eine bestimmte Feld-Reihenfolge (`jobname`
+     vor `file` oder umgekehrt) oder einen zusaetzlichen Header.
+
+  **v1.6.4 - ERSTER PRAXISTEST (gegen einen Nachbau, nicht Original-
+  Hardware): Kopplung funktionierte, Druckstart scheiterte mit
+  "Erwartete Digest-Authentifizierungs-Anfrage (401) blieb aus".**
+  Der Nutzer testete v1.6.3 gegen "Ultimaker Connect Raspi MK1" - ein in
+  einem ANDEREN Chat von Claude selbst gebautes, separates Projekt
+  (Raspberry Pi + USB-angeschlossener Ultimaker 2+, bildet die
+  Netzwerk-API eines netzwerkfaehigen Ultimaker nach, damit Cura ihn
+  wie einen normalen Netzwerkdrucker erkennt - siehe eigene
+  Memory-Datei `/areas/ultimaker-connect-raspi.md` fuer Details zu
+  jenem Projekt). **Der Chatverlauf jenes Projekts konnte trotz
+  mehrerer conversation_search-Versuche mit verschiedenen Suchbegriffen
+  nicht aufgefunden werden** - die exakte Implementierung des
+  Nachbaus (welche Endpunkte er tatsaechlich unterstuetzt) ist daher
+  NICHT bekannt, nur aus dem Fehlerbild erschlossen.
+  **Ursachenanalyse:** Die Fehlermeldung selbst war eindeutig:
+  `UltimakerConnection._digest_challenge()` (v1.6.3-Implementierung)
+  fragte gezielt den separaten Endpunkt `GET /api/v1/auth/verify` ab,
+  um die Digest-Challenge (realm/nonce) zu erhalten - erwartete dabei
+  eine 401-Antwort mit `WWW-Authenticate: Digest ...`. Blieb diese aus,
+  wurde eine Fehlermeldung geworfen. Da die KOPPLUNG (auth/request +
+  auth/check) beim Nutzer nachweislich funktionierte, aber der
+  Druckstart an dieser Stelle scheiterte, ist die wahrscheinlichste
+  Erklaerung: der Nachbau implementiert `/api/v1/auth/verify` schlicht
+  NICHT (dieser Endpunkt ist in der offiziellen Doku vorhanden, aber
+  fuer die KERNFUNKTION - Kopplung + Druckstart - nicht zwingend
+  erforderlich, ein Nachbau koennte ihn daher plausibel ausgelassen
+  haben, ohne dass das dem urspruenglichen Auftrag "Netzwerk-API
+  nachbilden, damit Cura den Drucker erkennt" widersprechen wuerde).
+  **Implementierte Aenderung (Robustheits-Fix, kein Rate-Versuch):**
+  `_digest_challenge()` fragt die Digest-Challenge jetzt nicht mehr
+  ueber den separaten `/api/v1/auth/verify`-Endpunkt ab, sondern direkt
+  vom TATSAECHLICHEN Ziel-Endpunkt `/api/v1/print_job` (per leerem
+  `POST`, `data=b""`, OHNE Datei) - das ist ohnehin der Endpunkt, dessen
+  Digest-Realm/Nonce fuer den anschliessenden echten Upload gebraucht
+  wird, und muss fuer die Kernfunktion "Druckauftraege senden" so oder
+  so korrekt auf eine unautorisierte Anfrage mit 401 + Digest-Challenge
+  reagieren - unabhaengig davon, ob zusaetzliche Nebenendpunkte wie
+  `/auth/verify` implementiert sind. Das macht die Implementierung
+  robuster gegenueber Nachbauten/vereinfachten API-Implementierungen,
+  ohne die Kompatibilitaet zu echter Ultimaker-Hardware zu gefaehrden
+  (die REALE Ultimaker-API muss laut Dokumentation ohnehin auch
+  `/print_job` selbst mit Digest-Auth schuetzen - das war nie
+  fraglich, nur OB zusaetzlich `/auth/verify` separat existiert).
+  Fehlermeldung fuer den verbleibenden Fehlerfall (Server akzeptiert die
+  leere Anfrage komplett ohne 401) wurde praezisiert: erklaert jetzt
+  explizit, dass entweder gar keine Digest-Authentifizierung verlangt
+  wird oder das Antwortverhalten von der Doku abweicht.
+  **Getestet (ohne echte Hardware, aber gezielt gegen das exakte
+  gemeldete Fehlerbild):** ein simulierter Server, der `/api/v1/auth/
+  verify` bewusst NICHT implementiert (404) aber `/print_job` korrekt
+  per Digest schuetzt, akzeptiert jetzt den kompletten `send_print()`-
+  Ablauf - dieses Szenario schlug mit dem v1.6.3-Code nachweislich fehl
+  (siehe Test in der Chat-Historie: `_digest_challenge()` warf exakt die
+  vom Nutzer gemeldete Fehlermeldung, bevor der Fix angewendet wurde).
+  Zusaetzlich: ein simulierter Server MIT `/auth/verify` bestaetigt
+  keine Regression fuer echte Ultimaker-Hardware (die diesen Endpunkt
+  laut Doku implementiert); ein dritter Test (Server verlangt gar keine
+  Authentifizierung) bestaetigt die praezisierte Fehlermeldung.
+  **Bestaetigung durch den Nutzer, dass der Druckstart gegen den
+  Nachbau jetzt tatsaechlich funktioniert, stand zum Zeitpunkt dieser
+  Übergabe noch aus** - der naechste sinnvolle Schritt waere:
+  1. Erneuter Test gegen "Ultimaker Connect Raspi MK1".
+  2. Falls IMMER NOCH derselbe Fehler auftritt: der Nachbau verlangt
+     vermutlich GAR KEINE Digest-Authentifizierung fuer `/print_job`
+     (dann wuerde die praezisierte Fehlermeldung das jetzt auch klar so
+     sagen) - dann waere zu klaeren, ob der Nachbau ueberhaupt eine
+     Authentifizierung fuer den Druckstart implementiert, und falls
+     nein, ob unser Dashboard optional auch OHNE Digest-Auth senden
+     koennen soll (waere ein separater, expliziter Kompatibilitaetsmodus,
+     kein Ersatz fuer die Digest-Auth-Implementierung, da echte
+     Ultimaker-Hardware diese zwingend braucht).
+  3. Falls ein ANDERER Fehler auftritt (z. B. 400/415 bei der leeren
+     Probe-Anfrage, noch bevor der Server ueberhaupt zur Auth-Pruefung
+     kommt): der Nachbau prueft moeglicherweise erst die Multipart-
+     Struktur, bevor er Authentifizierung prueft - dann muesste die
+     Probe-Anfrage einen (leeren) aber strukturell gueltigen multipart/
+     form-data-Body mitschicken statt eines komplett leeren Bodys.
+  4. Am zuverlaessigsten waere grundsaetzlich, den Chatverlauf des
+     "Ultimaker Connect Raspi"-Projekts zu finden (z. B. indem der
+     Nutzer direkt danach fragt oder dessen `app.py` hochlaedt) und die
+     tatsaechlich implementierten Endpunkte/das Auth-Verhalten direkt
+     nachzulesen, statt weiter aus Fehlermeldungen zu erschliessen.
+
+  **v1.6.5 - URSACHE ENDGUELTIG GEKLAeRT (echter Quellcode statt
+  Vermutung): der Nachbau prueft beim Druckstart GAR KEINE
+  Authentifizierung.** Der Nutzer lud auf Nachfrage `app.py`,
+  `README.md` UND `ultimaker_api.py` des "Ultimaker Connect Raspi
+  MK1"-Projekts direkt als Projekt-Dateien hoch (`/mnt/project/`) -
+  damit konnte die tatsaechliche Implementierung erstmals direkt
+  gelesen werden, statt weiter aus Fehlermeldungen zu erschliessen (wie
+  in v1.6.3/v1.6.4 noch noetig, da der zugehoerige Chat trotz mehrerer
+  `conversation_search`-Versuche nicht auffindbar war). Zentrale
+  Erkenntnisse aus dem tatsaechlichen Code:
+  - `GET /api/v1/auth/verify` liefert IMMER `200 {"message": "ok"}` -
+    nie eine 401-Antwort. Das erklaert den ERSTEN gemeldeten Fehler
+    (v1.6.3-Code fragte genau diesen Endpunkt ab).
+  - `POST /api/v1/print_job` prueft AUSSCHLIESSLICH, ob ein multipart-
+    Feld `"file"` vorhanden ist (`if "file" not in request.files:
+    return 400`) - **keinerlei Digest-Authentifizierung, keine
+    Ueberpruefung des id/key-Paars ueberhaupt**. Das erklaert den
+    ZWEITEN gemeldeten Fehler (v1.6.4-Code sendete eine leere Probe-
+    Anfrage OHNE Datei an genau diesen Endpunkt, was prompt mit 400
+    beantwortet wurde - nicht weil Authentifizierung fehlschlug,
+    sondern weil ueberhaupt keine Datei mitgeschickt wurde und der
+    Handler diese Pruefung offenbar VOR jeder denkbaren Auth-Pruefung
+    durchfuehrt - die aber ohnehin nirgends im Code existiert).
+  - `POST /api/v1/auth/request`/`GET /api/v1/auth/check/<id>`
+    implementieren den Kopplungs-Handshake zwar korrekt genug, damit
+    unser Dashboard eine erfolgreiche Kopplung sieht (jede Anfrage wird
+    laut Code-Kommentar UND README bewusst automatisch autorisiert, da
+    der Pi kein Display fuer eine physische Bestaetigung hat) - das
+    dabei erzeugte id/key-Paar wird aber an keiner Stelle im gesamten
+    Modul jemals wieder verwendet oder ueberprueft. Die Kopplung ist
+    also rein kosmetisch/protokollkonform fuer Cura's Verbindungs-
+    Dialog, hat aber keine tatsaechliche Sicherheitsfunktion in diesem
+    Nachbau.
+  **Implementierte Aenderung (generelle, nicht nachbau-spezifische
+  Robustheit):** `_digest_challenge()` (Ruecknahme der bisherigen
+  Fehler-werfenden Semantik) wurde zu `_digest_challenge_or_none()`
+  umgebaut: liefert weiterhin die geparste Challenge bei einer echten
+  401+Digest-Antwort (fuer echte Ultimaker-Hardware zwingend
+  erforderlich), liefert aber jetzt **`None` statt eine Exception zu
+  werfen**, wenn die Probe-Anfrage IRGENDEINE andere Antwort bekommt
+  (200, 400, 201, ...) - das deckt sowohl "akzeptiert alles ohne Auth"
+  als auch "lehnt aus einem anderen Grund ab, der nichts mit
+  Authentifizierung zu tun hat" (wie beim Nachbau: fehlende Datei) ab,
+  ohne zwischen beiden unterscheiden zu muessen - in beiden Faellen ist
+  die richtige Reaktion identisch: den echten Upload OHNE
+  Authorization-Header senden. `send_print()` fuegt den
+  `Authorization`-Header nur noch bedingt hinzu, wenn `challenge is not
+  None`. **Wichtig: das ist kein nachbau-spezifischer Hack**, sondern
+  eine allgemein sinnvolle Verhaltensweise ("nutze Authentifizierung,
+  falls verlangt, sonst nicht") - echte Ultimaker-Hardware, die
+  weiterhin zwingend 401+Digest liefert, ist davon unveraendert
+  betroffen und funktioniert weiterhin wie bisher; nur Server, die GAR
+  KEINE Auth verlangen, werden jetzt zusaetzlich unterstuetzt, statt
+  einen (in diesem Fall falschen) Fehler zu erzwingen.
+  **Getestet:** ein Test-Server, der EXAKT das Verhalten der echten
+  `ultimaker_api.py` nachbildet (auth/verify immer 200, print_job prueft
+  nur auf `"file"` im Multipart-Body, keinerlei Auth-Pruefung) -
+  `send_print()` funktioniert jetzt korrekt End-to-End dagegen. Zusaetzlich
+  weiterhin bestaetigt: (1) echte Ultimaker-Hardware-Simulation (401 +
+  Digest-Challenge, korrekte Zugangsdaten) funktioniert unveraendert -
+  keine Regression; (2) falsche Zugangsdaten bei einem Server, der
+  tatsaechlich Digest-Auth verlangt, wird weiterhin korrekt als Fehler
+  erkannt (nicht faelschlich als "keine Auth noetig" fehlinterpretiert,
+  da dieser Fall ueber einen echten 401 mit gueltiger Digest-Challenge
+  laeuft, nur die spaetere Antwort auf den ECHTEN Upload mit den
+  falschen Daten schlaegt fehl - unveraendertes Verhalten). Vollstaendiger
+  Regressionstest mit gemischten Druckertypen weiterhin erfolgreich.
+  **Bestaetigung durch den Nutzer, dass der Druckstart gegen den
+  Nachbau jetzt tatsaechlich funktioniert, stand zum Zeitpunkt dieser
+  Übergabe noch aus** - basiert aber diesmal auf einer Verifikation
+  gegen den TATSAECHLICHEN, vom Nutzer bereitgestellten Quellcode, nicht
+  mehr auf einer Vermutung aus dem Fehlerbild - deutlich hoehere
+  Zuversicht als bei den beiden vorherigen Versuchen.
+  **Lesson Learned:** Nach ZWEI aufeinanderfolgenden Fehlversuchen, das
+  Problem allein aus der Fehlermeldung zu erschliessen (v1.6.3, v1.6.4),
+  war die direkte Einsicht in den tatsaechlichen Server-Code der
+  entscheidende Schritt - beide vorherigen "Robustheits-Fixes" waren
+  in sich schluessig und plausibel, trafen aber nicht die tatsaechliche
+  Ursache, weil sie auf Annahmen ueber ein unbekanntes System beruhten.
+  Bei der Fehlersuche gegen ein System, dessen Quellcode potenziell
+  verfuegbar ist (hier: ein Projekt, das der Nutzer selbst mit Claude in
+  einem anderen Chat gebaut hat), sollte das Anfordern des tatsaechlichen
+  Codes VOR weiteren Vermutungen stehen, sobald mehr als ein
+  Vermutungsversuch fehlgeschlagen ist.
 - **Zweiter, unabhängiger MQTT-Broker** (`ExtrasMqttManager`) für frei
   definierbare Sensoren/Schalter, die einer Drucker-Karte angehängt
   werden. Aktivierung über `extras_mqtt` in `config.json`, Zuordnung über
@@ -1519,6 +1829,34 @@ daher meist, nur den Type-Tuple und die Frontend-Labels zu erweitern,
 
 ## 7. Bekannte Unsicherheiten / offene Punkte für die Weiterarbeit
 
+- **Ultimaker-Druckauftrag per Drag & Drop (v1.6.3-v1.6.5) - Ursache
+  endgueltig geklaert durch direkte Einsicht in den echten Nachbau-
+  Quellcode, Bestaetigung durch Nutzer noch ausstehend.** Erster
+  Praxistest lief gegen einen Nachbau ("Ultimaker Connect Raspi MK1",
+  ein separates Claude-Projekt aus einem anderen Chat), nicht gegen
+  echte Ultimaker-Hardware. Kopplung funktionierte durchgehend, der
+  Druckstart scheiterte zunaechst zweimal in Folge (v1.6.3, v1.6.4),
+  da beide Fixes auf VERMUTUNGEN ueber das Nachbau-Verhalten beruhten
+  (der zugehoerige Chat war trotz mehrerer `conversation_search`-
+  Versuche nicht auffindbar). Erst nachdem der Nutzer `app.py`,
+  `README.md` UND `ultimaker_api.py` des Nachbaus direkt als
+  Projekt-Dateien hochlud, liess sich die tatsaechliche Ursache klar
+  erkennen: **der Nachbau prueft beim Druckstart (`POST /api/v1/
+  print_job`) ueberhaupt keine Authentifizierung** - er verlangt nur,
+  dass ein Datei-Feld vorhanden ist. Das Kopplungs-Handshake (auth/
+  request + auth/check) ist rein kosmetisch fuer Cura's Verbindungs-
+  Dialog, das dabei erzeugte id/key-Paar wird nie ueberprueft. Fix
+  (v1.6.5): `_digest_challenge_or_none()` liefert jetzt `None` statt
+  eine Exception zu werfen, wenn die Probe-Anfrage keine 401-Digest-
+  Antwort bekommt - `send_print()` sendet dann ohne Authorization-
+  Header. Echte Ultimaker-Hardware (verlangt zwingend Digest-Auth)
+  bleibt davon unberuehrt. Siehe Abschnitt 5 "v1.6.5" fuer
+  vollstaendige Details. **Noch KEIN Test gegen echte Ultimaker-
+  Original-Hardware; Bestaetigung fuer den Nachbau durch den Nutzer
+  stand zum Zeitpunkt dieser Übergabe ebenfalls noch aus** - diesmal
+  aber mit deutlich hoeherer Zuversicht, da der Fix gegen den
+  tatsaechlichen, vom Nutzer bereitgestellten Server-Code verifiziert
+  wurde, nicht nur gegen eine Vermutung.
 - **Formlabs-Feldnamen** (`FL_PROGRESS_KEYS`, `FL_FILE_KEYS`,
   `FL_MATERIAL_KEYS`, `FL_STATE_KEYS` in `app.py`) sind nicht an einem
   echten Gerät verifiziert, nur aus Doku-Fragmenten plausibel abgeleitet.
@@ -1688,7 +2026,7 @@ Weiterarbeit: bei jeder ausgelieferten Änderung `APP_VERSION` in
 `app.py` erhöhen (semantisch: MAJOR.MINOR.PATCH — siehe README,
 Abschnitt 0a) und einen passenden Commit-Text mitliefern.**
 
-- Aktuelle Version: **v1.6.2** (v1.1.0: Drag-&-Drop-Druckfeature,
+- Aktuelle Version: **v1.6.5** (v1.1.0: Drag-&-Drop-Druckfeature,
   macOS-Build, Versionierung selbst. v1.2.0: AMS-Zuordnung als
   bestätigbarer Dialog statt Sofort-Druck. v1.3.0: Dialog zeigt nur noch
   die für den jeweiligen Druck tatsächlich benötigten Filamente
@@ -1865,7 +2203,34 @@ Abschnitt 0a) und einen passenden Commit-Text mitliefern.**
   [`confirmAmsModal()` baut das Array jetzt an den echten
   `data-true-index`-Positionen] gemeinsam. Isoliert mit Node.js
   getestet, inkl. Vergleichslauf alte vs. neue Logik. Bestätigung durch
-  Nutzer stand zum Zeitpunkt dieser Übergabe noch aus).
+  Nutzer stand zum Zeitpunkt dieser Übergabe noch aus. v1.6.3: neues
+  Feature [kein Bugfix] auf Nutzerwunsch — Druckauftrag per Drag & Drop
+  jetzt auch fuer Ultimaker (`.gcode`-Dateien, Cura-Export). Erfordert
+  einmalige Kopplung [Digest-Auth id/key-Paar, Bestaetigung am Drucker-
+  Display] vor dem ersten Druck. Eigene RFC-2617-Digest-Auth-
+  Implementierung [`_build_digest_authorization()`] statt Pythons
+  eingebautem `HTTPDigestAuthHandler`, um die Datei nur einmal statt
+  zweimal senden zu muessen. Gegen einen echten, selbst geschriebenen
+  Digest-Auth-Testserver verifiziert. Kompletter Test gegen einen
+  echten Ultimaker-Drucker stand zum Zeitpunkt dieser Übergabe noch aus.
+  v1.6.4: erster Praxistest — gegen "Ultimaker Connect Raspi MK1" [ein
+  Nachbau aus einem anderen Chat, nicht Original-Hardware]. Kopplung
+  funktionierte, Druckstart scheiterte: "Erwartete Digest-
+  Authentifizierungs-Anfrage (401) blieb aus". Ursache vermutet:
+  Challenge wurde über den separaten Endpunkt `/api/v1/auth/verify`
+  angefragt, den der Nachbau vermutlich nicht implementiert. Fix:
+  Challenge wird direkt vom Ziel-Endpunkt `/api/v1/print_job` geholt
+  [leerer POST] — **beim erneuten Test schlug auch dieser Fix fehl**
+  ["HTTP 400, erwartet: 401"]: v1.6.4 ebenfalls unvollständig. v1.6.5:
+  Nutzer lud den TATSÄCHLICHEN Quellcode des Nachbaus hoch [app.py,
+  README.md, ultimaker_api.py] — direkte Einsicht ergab: der Nachbau
+  prüft beim Druckstart überhaupt KEINE Authentifizierung, nur ob ein
+  Datei-Feld vorhanden ist. Fix: `_digest_challenge_or_none()` liefert
+  `None` statt Exception, wenn keine 401-Digest-Antwort kommt —
+  `send_print()` sendet dann ohne Authorization-Header, funktioniert
+  für beide Fälle [echte Hardware mit Zwangs-Auth UND Server ohne Auth]
+  gleichzeitig. Gegen den exakten Nachbau-Code getestet. Bestätigung
+  durch Nutzer stand zum Zeitpunkt dieser Übergabe noch aus).
 - `APP_VERSION` ist die einzige Quelle der Wahrheit; der GitHub-Actions-
   Workflow liest sie automatisch per Regex aus `app.py` aus.
 - Empfohlener Ablauf beim Ausliefern einer neuen Version: `APP_VERSION`
