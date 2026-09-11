@@ -56,8 +56,8 @@ mit `APP_VERSION` in `app.py` uebereinstimmen, siehe Abschnitt "Versionierung"
 weiter unten), legt der Workflow automatisch einen GitHub Release mit
 **beiden** Zip-Paketen als Download an:
 ```bash
-git tag v1.6.5
-git push origin v1.6.5
+git tag v1.6.6
+git push origin v1.6.6
 ```
 
 Der Workflow braucht keine weiteren Geheimnisse/Secrets — `GITHUB_TOKEN`
@@ -567,24 +567,28 @@ Karten-Grid, das sich alle 2,5 Sekunden aktualisiert.
   praezise).
 - **AMS-Zuordnungsvorschlag:** Farbe + Materialtyp jedes benoetigten
   Filaments werden mit den *aktuell* vom Drucker gemeldeten AMS-Faechern
-  abgeglichen (exakte Farbe + passender Typ). Kann ein Filament nicht
-  eindeutig zugeordnet werden (keine passende Farbe im AMS, kein AMS
-  erkannt, Datei ohne auswertbare Filament-Infos), wird **nicht
-  geraten** — die Vorauswahl steht dann auf "Extern / manuell am
-  Display".
+  abgeglichen. Kann ein Filament nicht eindeutig zugeordnet werden
+  (keine ausreichend aehnliche Farbe im AMS, kein AMS erkannt, Datei
+  ohne auswertbare Filament-Infos), wird **nicht geraten** — die
+  Vorauswahl steht dann auf "Extern / manuell am Display".
+  **Farbtoleranz (seit v1.6.6):** Die Farbe muss nicht mehr byte-genau
+  uebereinstimmen — kleinere Abweichungen (z. B. zwischen dem im
+  Slicer hinterlegten Farbwert und dem vom AMS/RFID gemeldeten Wert
+  fuer dasselbe Material, die technisch leicht unterschiedliche
+  Hex-Werte haben koennen, obwohl beide unzweifelhaft als dieselbe
+  Farbe gelten) werden jetzt toleriert. Die Schwelle ist bewusst eng
+  gewaehlt: deutlich unterschiedliche Farben (z. B. Gruen und
+  Hellgruen) werden weiterhin NICHT automatisch gleichgesetzt — eine
+  falsche automatische Zuordnung (Druck in der physisch falschen
+  Farbe) waere ein schlechteres Ergebnis als der sichere Rueckfall auf
+  manuelle Auswahl. Bei mehreren moeglichen Treffern wird das Fach mit
+  der geringsten Farbabweichung gewaehlt.
   **Wichtig bei Verbundwerkstoffen (seit v1.5.5 korrekt):** Materialien
   mit Verstaerkungs-Suffix (z. B. `PLA-CF`, `PETG-CF`, `ASA-CF`, `ABS-GF`)
   werden **nie** mit ihrer unverstaerkten Grundvariante (z. B. `PLA`,
-  `ASA`) verwechselt, selbst bei identischer Fach-Farbe — diese
-  Materialien haben unterschiedliche Druckeigenschaften und sollten
-  niemals automatisch gegeneinander ausgetauscht werden. Vorherige
-  Versionen hatten hier eine zu lockere Teilstring-Pruefung, die z. B.
-  ein Fach mit reinem ASA faelschlich als passend fuer ein ASA-CF-
-  Filament vorgeschlagen haben konnte, wenn die Farbe zufaellig
-  uebereinstimmte — das konnte dazu fuehren, dass der Drucker beim
-  Materialladen auf eine RFID-Abweichung stoesst und auf eine
-  Bestaetigung am Display wartet (was ohne jemanden vor Ort wie ein
-  Haengenbleiben wirkt).
+  `ASA`) verwechselt, selbst bei aehnlicher oder identischer Fach-Farbe
+  — diese Materialien haben unterschiedliche Druckeigenschaften und
+  sollten niemals automatisch gegeneinander ausgetauscht werden.
   Hinweis: In seltenen Faellen ist die Filament-ID in der `.3mf`-Datei
   selbst leer (ein bekanntes Slicer-Verhalten) — dann ignoriert die
   Druckerfirmware jede AMS-Zuordnung unabhaengig davon, was gesendet

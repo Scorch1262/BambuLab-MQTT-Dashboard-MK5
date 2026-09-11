@@ -73,7 +73,7 @@ nötig, keine externen Template-/Static-Ordner).
 | Verbindungsklassen | `class PrinterConnection`, `class FormlabsLocalApiConnection`, `class OctoPrintConnection`, `class CrealityConnection`, `class UltimakerConnection`, `class ExtrasMqttManager` |
 | Druckauftrag senden (Bambu) | `PrinterConnection.preview_print()`, `PrinterConnection.send_print()`, `PrinterConnection._request_print()`, `PrinterConnection.pause_mqtt()`/`resume_mqtt()`/`wait_for_mqtt_reconnect()`, `class ImplicitFtpTls`, `FTPS_PROFILES`, `_find_ftps_upload_helper()`, `ftps_upload_helper.py` (separate Datei/exe, eigenes `PROFILES`-Dict), `_run_ftps_upload_worker()` + Sentinel-Check `--ftps-upload-worker` (Fallback, ganz frueh im Modul), `DashboardApp.add_printer()` (Parameter `bambu_family`), `DashboardApp.prepare_print_job()`/`start_confirm_print_job()`/`cancel_print_job()`/`get_print_progress()`, Routen `POST /api/printers` (Feld `bambu_family`)/`POST /api/printers/<id>/print/prepare`\|`/confirm`, `GET .../print/progress/<job_id>`, `POST .../print/cancel`, JS `renderDropZone()`/`dzDrop()`/`openAmsModal()`/`confirmAmsModal()`/`pollAmsProgress()`/`submitAdd()` (Feld `f_bambu_family`) |
 | Druckauftrag senden (Ultimaker, seit v1.6.3) | `_parse_digest_challenge()`, `_build_digest_authorization()`, `_build_multipart_body()`, `UltimakerConnection.start_pairing()`/`check_pairing()`/`_digest_challenge()`/`send_print()`, `DashboardApp.start_ultimaker_pairing()`/`check_ultimaker_pairing()`/`send_ultimaker_print_now()` (nutzt dieselben `_print_jobs`/`_print_progress`-Strukturen wie Bambu weiter), Routen `POST /api/printers/<id>/ultimaker/pair/start`\|`/pair/status`\|`POST .../ultimaker/print` (nutzt die BESTEHENDEN generischen `GET .../print/progress/<job_id>`-Routen weiter, keine eigenen noetig), JS `renderUltimakerDropZone()`/`pairUltimaker()`/`dzDropUltimaker()`/`pollUltimakerProgress()` |
-| AMS-Zuordnungsvorschlag | `PrinterConnection.preview_print()` (liefert `total_filaments`), `_parse_3mf_filaments()` (liefert `(filamente, gesamtanzahl)`), `_parse_plate1_used_filament_indices()`, `_find_matching_tray()`, `_types_compatible()`, `_slot_to_flat_index()`, JS `openAmsModal()`/`amsRowHtml()` (`data-true-index`)/`confirmAmsModal()` (baut `ams_mapping` an den echten Filament-Positionen, nicht Anzeige-Reihenfolge) |
+| AMS-Zuordnungsvorschlag | `PrinterConnection.preview_print()` (liefert `total_filaments`), `_parse_3mf_filaments()` (liefert `(filamente, gesamtanzahl)`), `_parse_plate1_used_filament_indices()`, `_find_matching_tray()` (Farbtoleranz seit v1.6.6), `_color_distance()`, `COLOR_MATCH_TOLERANCE`, `_types_compatible()`, `_slot_to_flat_index()`, JS `openAmsModal()`/`amsRowHtml()` (`data-true-index`)/`confirmAmsModal()` (baut `ams_mapping` an den echten Filament-Positionen, nicht Anzeige-Reihenfolge) |
 | Versionsnummer | `APP_VERSION` (ganz oben in `app.py`), Route `GET /api/version`, `.github/workflows/build-exe.yml` (liest die Version per Regex aus) |
 | Orchestrierung | `class DashboardApp` |
 | REST-Routen | `@app.route(` |
@@ -1753,6 +1753,107 @@ daher meist, nur den Type-Tuple und die Frontend-Labels zu erweitern,
   einem anderen Chat gebaut hat), sollte das Anfordern des tatsaechlichen
   Codes VOR weiteren Vermutungen stehen, sobald mehr als ein
   Vermutungsversuch fehlgeschlagen ist.
+
+  **v1.6.6 - NEUER, ECHTER BUG GEFUNDEN: Farb-Zuordnung verlangte
+  byte-genaue Uebereinstimmung, obwohl die richtige Farbe physisch
+  vorhanden war.** Waehrend der Ultimaker-Nachbau-Fall (v1.6.5) noch
+  offen war, meldete der Nutzer ein NEUES, unabhaengiges Problem: der
+  bereits mehrfach beobachtete "Aufheizen des Druckbetts"-Hang trat auf
+  einem X1C erneut auf - diesmal bei einem EINFARBIGEN Druck mit
+  automatischer AMS-Zuordnung, obwohl mehrfarbige Drucke seit den
+  fruehe­ren Fixes (v1.5.10 flow_cali, v1.6.2 ams_mapping-Indizierung)
+  zuverlaessig funktioniert hatten. **Diagnose-Weg (mehrere Abzweigungen,
+  bis zur tatsaechlichen Ursache):**
+  1. Zunaechst vermutet: `flow_cali:true` (seit v1.5.10 fuer ALLE Drucke
+     erzwungen, nicht nur Mehrfarb-Drucke) koennte fuer Einzelfarb-
+     Drucke einen neuen Regressions-Fehler verursachen - Recherche ergab
+     aber keinen eindeutigen Beleg, UND mechanisch haette Flusskalibrierung
+     erst NACH dem Aufheizen relevant werden duerfen, nicht davor - diese
+     Theorie wurde deshalb nicht weiterverfolgt.
+  2. Der bewaehrte Diagnose-Test (Druck direkt am Display starten) wurde
+     vorgeschlagen, aber durch die Antworten des Nutzers ueberholt: er
+     stellte fest, dass es **am AMS-Zuordnungsdialog selbst** liegt - im
+     SELBEN Dialog fuehrt "automatischen Vorschlag uebernehmen" zum
+     Haengenbleiben, "Material selbst auswaehlen" funktioniert.
+  3. Erste Vermutung (falsch): ein JS-Bug beim Auslesen von "suggested"
+     vs. manuell gewaehltem Wert - der Code-Review zeigte aber, dass
+     beide Pfade strukturell korrekt denselben Werttyp liefern.
+  4. Entscheidende Klarstellung durch den Nutzer: der Dialog zeigte in
+     Wahrheit **"Keine passende Farbe im AMS gefunden"** - der
+     automatische Vorschlag fiel also auf "Extern/manuell" zurueck,
+     OBWOHL der Nutzer bestaetigte, dass Fach 0 tatsaechlich blaues PLA
+     enthielt und die Datei "PLA Blau" verlangte - physisch war die
+     richtige Spule vorhanden, unsere Zuordnung fand sie trotzdem nicht.
+  **Tatsaechliche Ursache:** `_find_matching_tray()` verlangte bisher
+  eine BYTE-GENAUE Hex-Farb-Uebereinstimmung (`tray_color != want_color:
+  continue`). Der vom Slicer in der `.3mf` hinterlegte Farbwert fuer
+  "Blau" und der vom AMS/RFID gemeldete Farbwert fuer dieselbe physische
+  Spule "Blau" muessen aber nicht byte-identisch sein (z. B. durch
+  unterschiedliche Bambu-Filament-Profile, Rundungsdifferenzen o. Ä.) -
+  beide sind zweifellos "Blau" fuer einen Menschen, aber technisch zwei
+  verschiedene Hex-Werte. Das erklaert auch die FRUeHERE Nutzer-
+  Beobachtung (vor v1.6.6, siehe Chatverlauf zum X1C-Mehrfarb-Fall):
+  "Gruen und Hellgruen ... sollte von der automatischen Zuordnung
+  automatisch als passend akzeptiert werden" - dieselbe Grundursache,
+  nur mit einem NOCH GROESSEREN Farbunterschied.
+  **Implementierte Aenderung:**
+  - Neue Funktion `_color_distance(hex_a, hex_b)`: berechnet den
+    euklidischen Abstand zweier 6-stelliger Hex-Farben im RGB-Raum
+    (0 = identisch).
+  - Neue Konstante `COLOR_MATCH_TOLERANCE = 30` - **bewusst konservativ
+    gewaehlt**: faengt kleine, unbeabsichtigte Abweichungen (Rundung,
+    unterschiedliche Profile fuer "dieselbe" Farbe) ab, ist aber weit
+    davon entfernt, tatsaechlich unterschiedliche Farben zu verwechseln
+    (Gruen/Hellgruen liegen bei Distanz ~231, also weit ausserhalb der
+    Toleranz - **bewusste Design-Entscheidung, Gruen/Hellgruen weiterhin
+    NICHT automatisch gleichzusetzen**, da eine falsche automatische
+    Zuordnung [Druck in der physisch falschen Farbe] schlimmer waere als
+    der sichere Rueckfall auf manuelle Auswahl).
+  - `_find_matching_tray()` umgebaut: statt "erstes Fach mit exakter
+    Farbe gewinnt" jetzt "Fach mit der GERINGSTEN Farbabweichung
+    INNERHALB der Toleranz gewinnt" (bei mehreren moeglichen Kandidaten
+    wird der naechstliegende Farbwert bevorzugt; bei einem exakten
+    Treffer aendert sich das Verhalten nicht).
+  - Verbundwerkstoff-Trennung (`_types_compatible()`, v1.5.5) bleibt
+    davon unberuehrt und wird weiterhin unabhaengig geprueft - ASA-CF
+    kann also auch mit der neuen Farbtoleranz nicht mit reinem ASA
+    verwechselt werden.
+  **Getestet:** `_color_distance()` isoliert mit mehreren realistischen
+  Werten kalibriert (kleine Abweichungen ~8 → innerhalb Toleranz,
+  Gruen/Hellgruen ~231 → weit ausserhalb, eindeutig andere Farben wie
+  Rot vs. Blau → weit ausserhalb); `_find_matching_tray()` mit dem
+  EXAKTEN gemeldeten AMS-Setup (Fach 0 Blau, Fach 1 leer, Fach 2 Grau,
+  Fach 4 Schwarz) und einem leicht abweichenden Blau-Hexwert fuer die
+  Datei nachgebildet - waehlt jetzt korrekt Fach 0 statt "kein Treffer";
+  Regressionstests fuer exakte Treffer, "am naechsten gewinnt bei
+  mehreren Kandidaten", eindeutig unterschiedliche Farben (Rot vs. Blau)
+  und die ASA/ASA-CF-Trennung (v1.5.5) bestaetigen keine Regression.
+  Vollstaendiger End-to-End-Test von der `.3mf`-Datei bis zur `/print/
+  prepare`-API-Antwort mit dem exakten gemeldeten AMS-Setup bestaetigt
+  `suggested_tray: 0` (Blau) statt `-1` (Extern/manuell).
+  **Offene, separate Beobachtung (nicht durch diesen Fix abgedeckt):**
+  Der Nutzer merkte an, dass beim Rueckfall auf "Extern/manuell" (wenn
+  wirklich keine passende Farbe gefunden wird) am Drucker-Display KEINE
+  Material-Abfrage erscheint, sondern der Drucker einfach haengen
+  bleibt. Das war bereits VOR v1.6.6 als offene, unbestaetigte
+  Vermutung dokumentiert (siehe fruehe Chronologie zum A1-Mini-Druck-
+  start: "der Druck muesste dann eigentlich trotzdem starten, ggf. mit
+  Nachfrage am Display") - mit diesem Fall erstmals empirisch
+  bestaetigt, dass es tatsaechlich zu einem Haengenbleiben statt einer
+  Nachfrage kommt. Da dieser Fix (bessere Farb-Erkennung) den
+  KONKRETEN gemeldeten Fall bereits loesen sollte (die passende Farbe
+  wird jetzt gefunden, kein Rueckfall auf Extern/manuell mehr noetig),
+  wurde diese separate Beobachtung nicht weiterverfolgt - waere aber
+  relevant, falls in Zukunft ein Fall auftritt, bei dem TATSAECHLICH
+  keine passende Farbe im AMS vorhanden ist (echtes Extern/manuell-
+  Szenario) und der Druck dabei haengt statt eine Nachfrage zu zeigen.
+  Dann waere zu klaeren, ob unser MQTT-Kommando fuer den externen/
+  manuellen Fall ein zusaetzliches Feld braucht, das wir bisher nicht
+  kennen - dafuer waere (wie schon mehrfach zuvor) ein MQTT-Sniffer-
+  Vergleich mit Bambu Studio fuer einen absichtlich auf "Extern"
+  gestellten Druck der praezisestee naechste Schritt.
+  **Bestaetigung durch den Nutzer stand zum Zeitpunkt dieser Übergabe
+  noch aus.**
 - **Zweiter, unabhängiger MQTT-Broker** (`ExtrasMqttManager`) für frei
   definierbare Sensoren/Schalter, die einer Drucker-Karte angehängt
   werden. Aktivierung über `extras_mqtt` in `config.json`, Zuordnung über
@@ -1964,6 +2065,29 @@ daher meist, nur den Type-Tuple und die Frontend-Labels zu erweitern,
   naechste, praeziseste Schritt, um zu pruefen, ob es noch eine weitere,
   bisher unentdeckte Indexierungs-Eigenheit gibt (z. B. falls die
   Filament-Nummerierung in bestimmten Faellen doch nicht 0-basiert waere).
+- **Farb-Zuordnung im AMS verlangte byte-genaue Uebereinstimmung -
+  behoben in v1.6.6, Bestaetigung durch Nutzer ausstehend.** Ein X1C
+  zeigte erneut das "Aufheizen des Druckbetts"-Haengenbleiben, diesmal
+  bei einem EINFARBIGEN Druck mit automatischer AMS-Zuordnung (Mehrfarb-
+  Drucke funktionierten seit v1.5.10/v1.6.2 zuverlaessig). Nach mehreren
+  Diagnose-Abzweigungen (flow_cali-Regression vermutet, dann verworfen;
+  JS-Bug beim Lesen des Vorschlags vermutet, dann per Code-Review
+  widerlegt) stellte sich heraus: der AMS-Dialog zeigte "Keine passende
+  Farbe im AMS gefunden", OBWOHL das entsprechende Fach nachweislich
+  die richtige Farbe (Blau) enthielt. Ursache: `_find_matching_tray()`
+  verlangte eine BYTE-GENAUE Hex-Farb-Uebereinstimmung - der vom Slicer
+  hinterlegte und der vom AMS/RFID gemeldete Farbwert fuer "dieselbe"
+  Farbe muessen aber nicht byte-identisch sein. Erklaert auch eine
+  fruehere Beobachtung des Nutzers zu Gruen/Hellgruen. Fix: neue
+  `_color_distance()`-Funktion (euklidischer RGB-Abstand) mit bewusst
+  konservativer Toleranz (`COLOR_MATCH_TOLERANCE = 30`) - faengt kleine
+  Profilabweichungen ab, verwechselt aber NICHT tatsaechlich
+  unterschiedliche Farben wie Gruen/Hellgruen (Distanz ~231, weit
+  ausserhalb der Toleranz). Siehe Abschnitt 5 "v1.6.6" fuer
+  vollstaendige Details, inkl. einer separaten, noch offenen
+  Beobachtung (Drucker zeigt bei echtem "Extern/manuell"-Rueckfall
+  keine Material-Abfrage, sondern haengt) - dafuer waere bei Bedarf ein
+  MQTT-Sniffer-Vergleich mit Bambu Studio der naechste Schritt.
 - **AMS-Zuordnung bei Verbundwerkstoffen (PLA-CF, PETG-CF, ASA-CF, PA-CF,
   ABS-GF usw.) - Fix in v1.5.5 ausgeliefert, war aber NICHT die Ursache
   des konkret gemeldeten Falls (siehe naechster Punkt fuer die
@@ -2026,7 +2150,7 @@ Weiterarbeit: bei jeder ausgelieferten Änderung `APP_VERSION` in
 `app.py` erhöhen (semantisch: MAJOR.MINOR.PATCH — siehe README,
 Abschnitt 0a) und einen passenden Commit-Text mitliefern.**
 
-- Aktuelle Version: **v1.6.5** (v1.1.0: Drag-&-Drop-Druckfeature,
+- Aktuelle Version: **v1.6.6** (v1.1.0: Drag-&-Drop-Druckfeature,
   macOS-Build, Versionierung selbst. v1.2.0: AMS-Zuordnung als
   bestätigbarer Dialog statt Sofort-Druck. v1.3.0: Dialog zeigt nur noch
   die für den jeweiligen Druck tatsächlich benötigten Filamente
@@ -2230,6 +2354,19 @@ Abschnitt 0a) und einen passenden Commit-Text mitliefern.**
   `send_print()` sendet dann ohne Authorization-Header, funktioniert
   für beide Fälle [echte Hardware mit Zwangs-Auth UND Server ohne Auth]
   gleichzeitig. Gegen den exakten Nachbau-Code getestet. Bestätigung
+  durch Nutzer stand zum Zeitpunkt dieser Übergabe noch aus. v1.6.6:
+  separates, neu gemeldetes Problem — X1C blieb erneut beim Aufheizen
+  hängen, diesmal bei einem EINFARBIGEN Druck mit automatischer
+  AMS-Zuordnung. Nach mehreren verworfenen Zwischentheorien [flow_cali-
+  Regression, JS-Bug] stellte sich heraus: der Dialog zeigte "Keine
+  passende Farbe im AMS gefunden", obwohl das Fach nachweislich die
+  richtige Farbe enthielt. Ursache: `_find_matching_tray()` verlangte
+  eine byte-genaue Hex-Farb-Übereinstimmung — Slicer- und AMS/RFID-
+  Farbwert für "dieselbe" Farbe müssen nicht byte-identisch sein. Fix:
+  neue `_color_distance()`-Funktion [euklidischer RGB-Abstand] mit
+  bewusst konservativer Toleranz [`COLOR_MATCH_TOLERANCE = 30`] — fängt
+  kleine Profilabweichungen ab, verwechselt aber nicht tatsächlich
+  unterschiedliche Farben wie Grün/Hellgrün [Distanz ~231]. Bestätigung
   durch Nutzer stand zum Zeitpunkt dieser Übergabe noch aus).
 - `APP_VERSION` ist die einzige Quelle der Wahrheit; der GitHub-Actions-
   Workflow liest sie automatisch per Regex aus `app.py` aus.

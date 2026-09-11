@@ -36,7 +36,7 @@ Konfiguration:         config.json (liegt im selben Ordner wie das Skript
 # Release-Tag und Datei-Namen zu erzeugen. Bei jeder ausgelieferten
 # Aenderung hier erhoehen (siehe Abschnitt in UEBERGABE.md fuer die
 # Regeln, was Major/Minor/Patch bedeutet).
-APP_VERSION = "1.6.5"
+APP_VERSION = "1.6.6"
 
 import os
 import sys
@@ -820,26 +820,72 @@ def _types_compatible(want_type: str, tray_type: str) -> bool:
     return want_base in tray_base or tray_base in want_base
 
 
+def _color_distance(hex_a: str, hex_b: str) -> int:
+    """Euklidischer Abstand zweier 6-stelliger Hex-Farbwerte im RGB-Raum
+    (0 = identisch, hoeher = unaehnlicher). Liefert eine sehr grosse Zahl
+    (kein Match moeglich), wenn einer der beiden Werte nicht als 6-
+    stellige Hex-Farbe geparst werden kann."""
+    try:
+        ar, ag, ab = int(hex_a[0:2], 16), int(hex_a[2:4], 16), int(hex_a[4:6], 16)
+        br, bg, bb = int(hex_b[0:2], 16), int(hex_b[2:4], 16), int(hex_b[4:6], 16)
+    except (ValueError, IndexError):
+        return 10**9
+    return int(((ar - br) ** 2 + (ag - bg) ** 2 + (ab - bb) ** 2) ** 0.5)
+
+
+# WICHTIG (v1.6.6 - Bugfix): Bewusst gewaehlte, KONSERVATIVE Toleranz
+# fuer die Farb-Zuordnung (siehe _find_matching_tray() unten). Vorher
+# wurde ein EXAKTER Hex-Vergleich verlangt - das fuehrte zu einem
+# bestaetigten, reproduzierbaren Fall: Die Slicer-Datei verlangte
+# "PLA Blau", das AMS hatte tatsaechlich ein Fach mit blauem PLA
+# bestueckt, trotzdem meldete der Dialog "Keine passende Farbe im AMS
+# gefunden" - weil der vom Slicer verwendete Blau-Hexwert nicht
+# BYTE-GENAU mit dem vom AMS/RFID gemeldeten Blau-Hexwert
+# uebereinstimmte (beide von einem Menschen zweifellos als "Blau"
+# bezeichnet, aber technisch unterschiedliche Werte, z. B. durch
+# unterschiedliche Bambu-Filament-Profile). Der Wert 30 ist bewusst
+# ENG gewaehlt (typische kleine Profil-/Rundungsabweichungen werden
+# erfasst) - er reicht NICHT aus, um z. B. "Gruen" und "Hellgruen"
+# (deutlich groesserer, beabsichtigter Farbunterschied) miteinander zu
+# verwechseln, da eine falsche automatische Zuordnung (Druck in der
+# physisch falschen Farbe) ein schlechteres Ergebnis waere als der
+# sichere Rueckfall auf "Extern/manuell am Display".
+COLOR_MATCH_TOLERANCE = 30
+
+
 def _find_matching_tray(filament: dict, ams_trays: list, used_slots: set):
-    """Sucht das erste noch nicht verwendete AMS-Fach, dessen Farbe exakt
-    passt und dessen Typ plausibel uebereinstimmt (z. B. angeforderes
-    "PLA" passt zu Fach-Typ "PLA Basic", aber "ASA" passt NICHT zu
-    "ASA-CF" - siehe _types_compatible()). Liefert None statt zu raten,
-    wenn nichts eindeutig passt."""
+    """Sucht das AM BESTEN passende, noch nicht verwendete AMS-Fach:
+    Farbe muss innerhalb von COLOR_MATCH_TOLERANCE liegen (siehe dort -
+    bewusst eng, um keine tatsaechlich unterschiedlichen Farben zu
+    verwechseln) und der Typ muss plausibel uebereinstimmen (z. B.
+    angefordertes "PLA" passt zu Fach-Typ "PLA Basic", aber "ASA" passt
+    NICHT zu "ASA-CF" - siehe _types_compatible()). Bei mehreren
+    passenden Faechern gewinnt das mit der GERINGSTEN Farbabweichung
+    (bei einem exakten Treffer aendert sich dadurch nichts). Liefert
+    None statt zu raten, wenn nichts hinreichend gut passt."""
     want_color = filament.get("color") or ""
     want_type = filament.get("type") or ""
+    if not want_color:
+        return None
+    best = None
+    best_distance = None
     for tray in ams_trays:
         slot = tray.get("slot")
         if not slot or slot in used_slots:
             continue
         tray_color = _normalize_hex(tray.get("color"))
-        if not want_color or tray_color != want_color:
+        if not tray_color:
+            continue
+        distance = _color_distance(want_color, tray_color)
+        if distance > COLOR_MATCH_TOLERANCE:
             continue
         tray_type = (tray.get("type") or "").strip().upper()
         if not _types_compatible(want_type, tray_type):
             continue
-        return tray
-    return None
+        if best is None or distance < best_distance:
+            best = tray
+            best_distance = distance
+    return best
 
 
 def _run_ftps_upload_worker(argv):
