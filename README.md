@@ -1,4 +1,4 @@
-# Bambu Lab + Formlabs Drucker Dashboard
+# Bambu Lab Drucker Dashboard
 
 ![Bild](Unbenannt.PNG)
 
@@ -56,8 +56,8 @@ mit `APP_VERSION` in `app.py` uebereinstimmen, siehe Abschnitt "Versionierung"
 weiter unten), legt der Workflow automatisch einen GitHub Release mit
 **beiden** Zip-Paketen als Download an:
 ```bash
-git tag v1.6.6
-git push origin v1.6.6
+git tag v1.6.8
+git push origin v1.6.8
 ```
 
 Der Workflow braucht keine weiteren Geheimnisse/Secrets — `GITHUB_TOKEN`
@@ -465,16 +465,30 @@ Seriennummer (fuer das MQTT-Topic). Das Formular "Drucker hinzufuegen" im
 Dashboard fragt daher fuenf Felder ab: **Name, IP-Adresse, Access Code,
 Seriennummer, Druckerfamilie**.
 
-**Druckerfamilie (seit v1.6.1):** Zusaetzlich zur Auswahl **X1-Serie
-(X1C, X1E)** oder **A1-Serie (A1, A1 Mini)**. Diese Auswahl bestimmt, mit
-welcher Verbindungseinstellung der Datei-Upload (Abschnitt 4a) beim
-allerersten Versuch arbeitet — beide Druckerfamilien brauchen
-unterschiedliche, teils gegensaetzliche Einstellungen (siehe Abschnitt
-4a fuer den technischen Hintergrund). **Eine falsche Auswahl verhindert
-den Druck nicht** — das Dashboard probiert bei einem Fehlschlag
-automatisch die jeweils andere Einstellung im zweiten Versuch — sie
-spart nur einen unnoetigen Fehlversuch beim allerersten Druck.
-Voreingestellt ist "X1-Serie".
+**Druckerfamilie (seit v1.6.1, H2-Serie seit v1.6.7, P1/P2/X2-Serie
+seit v1.6.8):** Zur Auswahl stehen **X1-Serie (X1C, X1E)**, **A1-Serie
+(A1, A1 Mini)**, **H2-Serie (H2S, H2D, H2D Pro, H2C)**, **P1-Serie
+(P1P, P1S)**, **P2-Serie (P2S)** und **X2-Serie (X2D)**. Diese Auswahl
+bestimmt, mit welcher Verbindungseinstellung der Datei-Upload
+(Abschnitt 4a) beim allerersten Versuch arbeitet — die Druckerfamilien
+brauchen teils unterschiedliche, teils gegensaetzliche Einstellungen
+(siehe Abschnitt 4a fuer den technischen Hintergrund). **Eine falsche
+Auswahl verhindert den Druck nicht** — das Dashboard probiert bei
+einem Fehlschlag automatisch die jeweils andere Einstellung im zweiten
+Versuch — sie spart nur einen unnoetigen Fehlversuch beim allerersten
+Druck. Voreingestellt ist "X1-Serie".
+**Hinweis zur H2-, P1-, P2- und X2-Serie:** Es liegen noch keine
+eigenen Erkenntnisse zu deren FTPS-Verhalten vor — sie nutzen deshalb
+vorerst mangels anderer Informationen dieselbe Verbindungseinstellung
+wie die X1-Serie (begruendete, aber unbestaetigte Annahme: alle vier
+laufen vermutlich wie X1C/X1E auf einer vollwertigen Linux-Basis,
+eher vergleichbar mit der X1- als der leichtgewichtigeren A1-Serie —
+die X2-Serie [X2D] ist zudem der offizielle Nachfolger der inzwischen
+eingestellten X1C/X1E, die P1-Serie war urspruenglich direkt von der
+X1-Technik abgeleitet). Falls sich das fuer eine dieser Familien als
+falsch herausstellt, greift automatisch der Fallback auf das andere
+Profil im zweiten Versuch, genau wie bei einer falschen Auswahl bei
+X1/A1.
 
 **Zusaetzlich fuer die Druckfunktion (Abschnitt 4a) noetig:** Der
 **"Developer Mode"** muss zusaetzlich zum LAN-Modus separat aktiviert

@@ -36,7 +36,7 @@ Konfiguration:         config.json (liegt im selben Ordner wie das Skript
 # Release-Tag und Datei-Namen zu erzeugen. Bei jeder ausgelieferten
 # Aenderung hier erhoehen (siehe Abschnitt in UEBERGABE.md fuer die
 # Regeln, was Major/Minor/Patch bedeutet).
-APP_VERSION = "1.6.6"
+APP_VERSION = "1.6.8"
 
 import os
 import sys
@@ -472,9 +472,18 @@ class PrinterConnection:
         # Versuch 2 erhalten (z. B. falls die Familie falsch gewaehlt
         # wurde oder sich das Druckermodell geaendert hat), Versuch 3
         # wiederholt das urspruenglich bekannte Profil sicherheitshalber.
+        # WICHTIG (v1.6.7): "bambu_family" (x1/a1/h2, vom Nutzer beim
+        # Anlegen gewaehlt) wird ueber BAMBU_FAMILY_TO_FTPS_PROFILE auf
+        # ein TATSAECHLICHES Verbindungsprofil abgebildet - fuer "h2"
+        # aktuell identisch zu "x1" (siehe dortiger Kommentar). Die
+        # Alternierung selbst bleibt unveraendert: das ermittelte Profil
+        # steht an erster UND dritter Stelle, das jeweils andere Profil
+        # (meist "a1") bleibt als automatischer Fallback fuer Versuch 2
+        # erhalten.
         known_family = self.cfg.get("bambu_family", "x1")
-        other_family = "a1" if known_family == "x1" else "x1"
-        profile_pattern = [known_family, other_family, known_family]
+        known_profile = BAMBU_FAMILY_TO_FTPS_PROFILE.get(known_family, "x1")
+        other_profile = "a1" if known_profile == "x1" else "x1"
+        profile_pattern = [known_profile, other_profile, known_profile]
         attempts = []
         for attempt in range(1, 4):
             profile_name = profile_pattern[attempt - 1]
@@ -1020,6 +1029,38 @@ class ImplicitFtpTls(ftplib.FTP_TLS):
 FTPS_PROFILES = {
     "x1": {"cap_tls12": True, "reuse_session": True, "skip_unwrap": False},
     "a1": {"cap_tls12": False, "reuse_session": False, "skip_unwrap": True},
+}
+
+# WICHTIG (v1.6.7): Bildet die beim Anlegen eines Druckers gewaehlte
+# Druckerfamilie ("x1"/"a1"/"h2"/"p1"/"p2"/"x2", siehe DashboardApp.
+# add_printer()) auf ein tatsaechliches FTPS-Verbindungsprofil aus
+# FTPS_PROFILES ab. Fuer H2 (H2S/H2D/H2D Pro/H2C, ergaenzt in v1.6.7)
+# sowie P1 (P1P/P1S), P2 (P2S) und X2 (X2D, ergaenzt in v1.6.8) liegen
+# noch KEINE eigenen Erkenntnisse zum FTPS-Verhalten vor - sie nutzen
+# deshalb vorerst mangels anderer Informationen dasselbe Profil wie die
+# X1-Serie:
+#   - P1-Serie: laut Bambu-eigener Ankündigung technisch direkt vom X1
+#     abgeleitet ("retained the core technology" der X1, nur guenstigere
+#     Hardware/weniger Sensorik) - von den hier ergaenzten Familien am
+#     ehesten tatsaechlich mit dem X1-Profil identisch.
+#   - X2-Serie (X2D): offizieller Nachfolger der (im Maerz 2026
+#     eingestellten) X1C/X1E-Modelle - ebenfalls vollwertige Linux-
+#     Basis zu erwarten.
+#   - P2-Serie (P2S): Nachfolger der P1-Serie, "combines the ...
+#     P1-Series with next-generation technologies from the H2D/H2S" -
+#     technische Abstammung nicht ganz eindeutig, aber ebenfalls eher
+#     mit der X1-Serie als mit der leichtgewichtigeren A1-Serie
+#     vergleichbar.
+# Stellt sich das fuer eine dieser Familien als falsch heraus, genuegt
+# es, hier den jeweiligen Eintrag zu aendern (ggf. mit einem eigenen,
+# neuen Profil in FTPS_PROFILES, falls weder "x1" noch "a1" passen).
+BAMBU_FAMILY_TO_FTPS_PROFILE = {
+    "x1": "x1",
+    "a1": "a1",
+    "h2": "x1",  # vorlaeufig, siehe Kommentar oben
+    "p1": "x1",  # vorlaeufig, siehe Kommentar oben
+    "p2": "x1",  # vorlaeufig, siehe Kommentar oben
+    "x2": "x1",  # vorlaeufig, siehe Kommentar oben
 }
 
 
@@ -2091,10 +2132,12 @@ class DashboardApp:
                 "serial": serial,
                 "mqtt_port": mqtt_port,
                 "camera_port": camera_port,
-                # "x1" (X1C/X1E) oder "a1" (A1/A1 Mini) - steuert, welches
-                # FTPS-Verbindungsprofil beim ersten Upload-Versuch
-                # genutzt wird (siehe FTPS_PROFILES/_ftps_upload()).
-                "bambu_family": bambu_family if bambu_family in ("x1", "a1") else "x1",
+                # "x1" (X1C/X1E), "a1" (A1/A1 Mini), "h2" (H2S/H2D/H2D
+                # Pro/H2C), "p1" (P1P/P1S), "p2" (P2S) oder "x2" (X2D) -
+                # steuert, welches FTPS-Verbindungsprofil beim ersten
+                # Upload-Versuch genutzt wird (siehe FTPS_PROFILES/
+                # BAMBU_FAMILY_TO_FTPS_PROFILE/_ftps_upload()).
+                "bambu_family": bambu_family if bambu_family in BAMBU_FAMILY_TO_FTPS_PROFILE else "x1",
             })
 
         self.cfg["printers"].append(new_printer)
@@ -2465,16 +2508,26 @@ def api_add_printer():
         serial = (data.get("serial") or "").strip()
         if not access_code or not serial:
             return jsonify({"error": "Fuer Bambu Lab Drucker sind Access Code und Seriennummer Pflichtfelder."}), 400
-        # WICHTIG (v1.6.1): Druckerfamilie ("x1"/"a1") bestimmt, welches
-        # FTPS-Verbindungsprofil beim allerersten Upload-Versuch benutzt
+        # WICHTIG (v1.6.1): Druckerfamilie bestimmt, welches FTPS-
+        # Verbindungsprofil beim allerersten Upload-Versuch benutzt
         # wird (siehe PrinterConnection._ftps_upload() und
         # FTPS_PROFILES) - vermeidet unnoetige Fehlversuche, wenn das
         # Druckermodell bereits bekannt ist. "x1" bleibt der Standard
         # (Ruestet auch bestehende Konfigurationen ohne dieses Feld ab -
         # siehe load_config()), da die X1-Serie zuerst zuverlaessig
         # geloest wurde und mehr Nutzer betreffen duerfte.
+        # WICHTIG (v1.6.7/v1.6.8): "h2" (H2S/H2D/H2D Pro/H2C), "p1"
+        # (P1P/P1S), "p2" (P2S) und "x2" (X2D) als weitere Familien
+        # ergaenzt - gueltige Werte ergeben sich direkt aus
+        # BAMBU_FAMILY_TO_FTPS_PROFILE (siehe dortiger Kommentar fuer
+        # die Begruendung, warum sie vorerst alle das X1-Profil nutzen -
+        # das ist jeweils eine begruendete, aber unbestaetigte Annahme).
+        # Sollte sich das fuer eine Familie als falsch herausstellen,
+        # ist die einzige noetige Aenderung ein neuer Eintrag in
+        # BAMBU_FAMILY_TO_FTPS_PROFILE (und ggf. ein eigenes Profil in
+        # FTPS_PROFILES, falls X1 nicht passt).
         bambu_family = (data.get("bambu_family") or "x1").strip().lower()
-        if bambu_family not in ("x1", "a1"):
+        if bambu_family not in BAMBU_FAMILY_TO_FTPS_PROFILE:
             bambu_family = "x1"
         printer = dash.add_printer(name, ip, ptype="bambu", access_code=access_code,
                                     serial=serial, bambu_family=bambu_family)
@@ -2990,6 +3043,10 @@ INDEX_HTML = r"""
       <select id="f_bambu_family">
         <option value="x1">X1-Serie (X1C, X1E)</option>
         <option value="a1">A1-Serie (A1, A1 Mini)</option>
+        <option value="h2">H2-Serie (H2S, H2D, H2D Pro, H2C)</option>
+        <option value="p1">P1-Serie (P1P, P1S)</option>
+        <option value="p2">P2-Serie (P2S)</option>
+        <option value="x2">X2-Serie (X2D)</option>
       </select>
       <div class="hint-text">
         Bestimmt, welche Verbindungseinstellung fuer den Datei-Upload
@@ -2998,6 +3055,9 @@ INDEX_HTML = r"""
         falscher Wahl wird automatisch die jeweils andere Einstellung
         im zweiten Versuch ausprobiert - der Druck funktioniert also so
         oder so, eine korrekte Auswahl spart nur einen Fehlversuch.
+        Fuer die H2-, P1-, P2- und X2-Serie liegen noch keine eigenen
+        Erkenntnisse vor - sie nutzen vorerst dieselbe Einstellung wie
+        die X1-Serie.
       </div>
     </div>
 

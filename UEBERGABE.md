@@ -1854,6 +1854,139 @@ daher meist, nur den Type-Tuple und die Frontend-Labels zu erweitern,
   gestellten Druck der praezisestee naechste Schritt.
   **Bestaetigung durch den Nutzer stand zum Zeitpunkt dieser Übergabe
   noch aus.**
+
+  **v1.6.7 - NEUES FEATURE (kein Bugfix): H2-Serie als dritte
+  Druckerfamilie ergaenzt.** Auf Nutzerwunsch: Bambu Lab hat seit der
+  urspruenglichen X1/A1-Unterscheidung (v1.6.1) eine dritte Produktlinie
+  eingefuehrt, die H2-Serie (H2S, H2D, H2D Pro, H2C - recherchiert und
+  bestaetigt ueber mehrere offizielle/haendlerseitige Quellen, keine
+  geratenen Modellnamen). Der Nutzer wies explizit an: mangels eigener
+  Erkenntnisse zum FTPS-Verhalten der H2-Serie soll sie VORERST
+  dieselbe Uebertragungsmethode wie die X1-Serie verwenden.
+  **Implementierte Aenderung:**
+  - Neue Zuordnungstabelle `BAMBU_FAMILY_TO_FTPS_PROFILE` (Modulebene,
+    direkt nach `FTPS_PROFILES` platziert): bildet die vom Nutzer
+    gewaehlte Druckerfamilie ("x1"/"a1"/"h2") auf ein tatsaechliches
+    Verbindungsprofil aus `FTPS_PROFILES` ab. Fuer "h2" aktuell `"x1"`
+    - eine bewusste, im Code ausfuehrlich begruendete Annahme (H2-Serie
+    laeuft vermutlich wie X1C/X1E auf einer vollwertigen Linux-Basis,
+    eher vergleichbar mit der X1- als der leichtgewichtigeren,
+    vermutlich ESP32-basierten A1-Serie), aber unbestaetigt. Diese
+    Trennung (Familie vs. tatsaechliches Profil) ist bewusst so
+    gewaehlt, dass eine kuenftige Korrektur (z. B. falls die H2-Serie
+    doch ein eigenes Profil braucht) NUR diese eine Zuordnungstabelle
+    betrifft - `FTPS_PROFILES` selbst, `_ftps_upload()`s Alternierungs-
+    Logik und alle Tests bleiben davon unberuehrt, es sei denn, ein
+    komplett neues, drittes Profil wird noetig.
+  - `PrinterConnection._ftps_upload()`: liest jetzt `known_profile =
+    BAMBU_FAMILY_TO_FTPS_PROFILE.get(known_family, "x1")` statt die
+    Familie direkt als Profilnamen zu verwenden - die Alternierungs-
+    Logik selbst (bekanntes Profil an 1./3. Stelle, das jeweils andere
+    als Fallback an 2. Stelle) bleibt unveraendert.
+  - `api_add_printer()`-Route und `DashboardApp.add_printer()`:
+    Validierung um `"h2"` erweitert (`bambu_family not in ("x1", "a1",
+    "h2")` faellt weiterhin auf `"x1"` zurueck).
+  - Frontend: neue `<option value="h2">H2-Serie (H2S, H2D, H2D Pro,
+    H2C)</option>` im "Drucker hinzufuegen"-Formular, Hinweistext um
+    einen Satz zur H2-Serie ergaenzt.
+  - `load_config()`s Rueckwaertskompatibilitaets-`setdefault()` bleibt
+    unveraendert (`"x1"` als Default fuer alle bestehenden Konfigu-
+    rationen ohne dieses Feld) - keine Anpassung noetig, da "h2" nur
+    ein zusaetzlicher, gueltiger Wert ist, kein veraendertes
+    Standardverhalten.
+  **Getestet:** H2-Drucker anlegen und `bambu_family="h2"` korrekt
+  gespeichert bestaetigt; ungueltiger Familienwert faellt weiterhin
+  korrekt auf `"x1"` zurueck; `BAMBU_FAMILY_TO_FTPS_PROFILE`-Zuordnung
+  isoliert verifiziert (`h2`→`x1`, `x1`→`x1`, `a1`→`a1`); vollstaendiger
+  FTPS-Upload-Test mit einem H2-Drucker bestaetigt, dass tatsaechlich
+  das `x1`-Profil beim ERSTEN Versuch verwendet wird (Fake-Helfer
+  protokolliert das verwendete Profil); Fallback-Alternierung fuer
+  H2-Drucker getestet (simulierter Fehlschlag mit `x1`-Profil fuehrt
+  korrekt zum Fallback auf `a1`-Profil im zweiten Versuch - die
+  bestehende Alternierungs-Logik funktioniert unveraendert, unabhaengig
+  von der Familie); Rueckwaertskompatibilitaet mit einer alten
+  `config.json` ohne `bambu_family`-Feld bestaetigt (weiterhin `"x1"`);
+  HTML-Formular enthaelt die neue Option; vollstaendiger Regressionstest
+  mit allen drei Familien gleichzeitig (X1/A1/H2) angelegt und ueber
+  `/api/status` abgefragt.
+  **Kein Test gegen echte H2-Serie-Hardware moeglich** (dem Nutzer
+  liegt aktuell offenbar keine vor) - die "x1"-Profil-Annahme ist
+  reine Vorsichtsmassnahme, keine verifizierte Tatsache. Sollte ein
+  Nutzer mit H2-Serie-Hardware kuenftig einen FTPS-Fehler melden, waere
+  der erste Schritt zu pruefen, ob Profil "a1" (der automatische
+  Fallback im zweiten Versuch) erfolgreich ist - falls ja, sollte
+  `BAMBU_FAMILY_TO_FTPS_PROFILE["h2"]` einfach auf `"a1"` umgestellt
+  werden. Falls WEDER "x1" NOCH "a1" fuer die H2-Serie funktionieren,
+  waere ein komplett neues, drittes Profil in `FTPS_PROFILES` noetig -
+  dann waere die gleiche Diagnose-Methodik wie bei A1 Mini angebracht
+  (Vergleich mit Bambu Studio, TLS-Version/Sitzungs-Wiederverwendung/
+  Verbindungsabschluss systematisch durchtesten, siehe Chronologie zu
+  v1.5.0-v1.6.0 fuer das Vorgehen).
+
+  **v1.6.8 - NEUES FEATURE (kein Bugfix): P1-, P2- und X2-Serie nach
+  demselben Muster wie H2 (v1.6.7) ergaenzt.** Auf Nutzerwunsch,
+  explizit "auf die gleiche Weise" wie H2: drei weitere Bambu-
+  Produktlinien als Druckerfamilie waehlbar - P1 (P1P, P1S), P2 (P2S)
+  und X2 (X2D). Modellnamen recherchiert und ueber mehrere unabhaengige
+  Quellen (Bambu-eigene Vergleichsseite, Haendlerseiten, Fachportale)
+  bestaetigt, keine geratenen Bezeichnungen. Alle drei nutzen - wie bei
+  H2 bereits mangels eigener Erkenntnisse entschieden - vorerst
+  dasselbe FTPS-Profil wie die X1-Serie:
+  - **P1-Serie:** laut Bambu Labs eigener Ankuendigung des P2S
+    technisch direkt von der X1 abgeleitet ("retained the core
+    technology" der X1, nur guenstigere Hardware/weniger Sensorik,
+    urspruenglich als preiswertere X1-Variante eingefuehrt) - von den
+    ergaenzten Familien am ehesten TATSAECHLICH mit dem X1-Profil
+    identisch, nicht nur mangels Alternative angenommen.
+  - **X2-Serie (X2D):** offizieller, direkter Nachfolger der im Maerz
+    2026 eingestellten X1C/X1E - ebenfalls vollwertige Linux-Basis zu
+    erwarten, X1-Profil als naheliegendste Annahme.
+  - **P2-Serie (P2S):** Nachfolger der P1-Serie, "combines ... the
+    P1-Series with next-generation technologies from H2D/H2S" - laut
+    Recherche technische Abstammung nicht ganz eindeutig zwischen
+    P1-/X1- und H2-Technik, aber ebenfalls eher mit der X1- als mit
+    der leichtgewichtigeren A1-Serie vergleichbar (beide sind
+    vollwertige Linux-Systeme, kein ESP32-artiger Aufbau).
+  **Implementierte Aenderung:**
+  - `BAMBU_FAMILY_TO_FTPS_PROFILE` um drei Eintraege ergaenzt:
+    `"p1": "x1"`, `"p2": "x1"`, `"x2": "x1"` (alle vorlaeufig, analog
+    zu `"h2"`).
+  - Validierung an beiden bisherigen Stellen (`api_add_printer()`-
+    Route, `DashboardApp.add_printer()`) refaktoriert: statt der
+    Familie gegen eine hartkodierte Tupel-Liste zu pruefen (die bei
+    jeder neuen Familie an ZWEI Stellen synchron gehalten werden
+    musste), wird jetzt direkt gegen die Schluessel von
+    `BAMBU_FAMILY_TO_FTPS_PROFILE` geprueft (`bambu_family not in
+    BAMBU_FAMILY_TO_FTPS_PROFILE`) - eine neue Familie kuenftig
+    hinzuzufuegen erfordert dadurch nur noch EINEN Code-Ort (die
+    Zuordnungstabelle selbst), nicht mehr mehrere synchron zu
+    haltende Stellen. Diese Refaktorierung ist rein strukturell, kein
+    Verhaltensunterschied fuer bestehende Familien.
+  - Frontend: drei neue `<option>`-Eintraege im "Drucker hinzufuegen"-
+    Formular (`p1`/`p2`/`x2`), Hinweistext auf "H2-, P1-, P2- und
+    X2-Serie" erweitert.
+  **Getestet:** alle drei neuen Familien einzeln angelegt und
+  `bambu_family` korrekt gespeichert bestaetigt; Profilzuordnung fuer
+  alle drei isoliert verifiziert (`p1`/`p2`/`x2` → jeweils `"x1"`);
+  bestehende Familien (`x1`/`a1`/`h2`) nach der Refaktorierung
+  weiterhin unveraendert korrekt; ungueltiger Wert faellt weiterhin auf
+  `"x1"` zurueck; vollstaendiger FTPS-Upload-Test mit einem X2-Drucker
+  bestaetigt, dass tatsaechlich das `x1`-Profil beim ERSTEN Versuch
+  verwendet wird (Fake-Helfer protokolliert das verwendete Profil);
+  vollstaendiger API-Route-Test fuer alle vier "unbestaetigten"
+  Familien (h2/p1/p2/x2); HTML-Formular enthaelt alle neuen Optionen;
+  Regressionstest mit allen SECHS Familien gleichzeitig angelegt und
+  ueber `/api/status` abgefragt.
+  **Kein Test gegen echte P1-, P2- oder X2-Serie-Hardware moeglich**
+  (dem Nutzer liegt aktuell offenbar keine vor) - wie bei H2 sind die
+  "x1"-Profil-Annahmen fuer P2 und X2 reine Vorsichtsmassnahmen, keine
+  verifizierten Tatsachen (fuer P1 etwas besser abgesichert durch die
+  direkte technische Abstammung von X1). Gleiches Vorgehen wie bei H2
+  fuer die Weiterarbeit: bei gemeldeten FTPS-Fehlern zuerst pruefen, ob
+  der automatische Fallback (Profil "a1" im zweiten Versuch) hilft -
+  falls ja, genuegt eine einzeilige Aenderung der Zuordnungstabelle;
+  falls nein, dieselbe Diagnose-Methodik wie beim A1-Mini-Fall
+  anwenden (siehe Chronologie zu v1.5.0-v1.6.0).
 - **Zweiter, unabhängiger MQTT-Broker** (`ExtrasMqttManager`) für frei
   definierbare Sensoren/Schalter, die einer Drucker-Karte angehängt
   werden. Aktivierung über `extras_mqtt` in `config.json`, Zuordnung über
@@ -1930,6 +2063,21 @@ daher meist, nur den Type-Tuple und die Frontend-Labels zu erweitern,
 
 ## 7. Bekannte Unsicherheiten / offene Punkte für die Weiterarbeit
 
+- **H2-, P1-, P2- und X2-Serie als Druckerfamilie waehlbar seit v1.6.7/
+  v1.6.8 - FTPS-Profil "x1" ist fuer alle vier eine unbestaetigte
+  Annahme (fuer P1 etwas besser abgesichert), kein Test gegen echte
+  Hardware fuer irgendeine davon moeglich.** Der Nutzer bat explizit
+  darum, alle vier mangels eigener Erkenntnisse vorerst wie die
+  X1-Serie zu behandeln (`BAMBU_FAMILY_TO_FTPS_PROFILE["h2"/"p1"/"p2"/
+  "x2"] = "x1"`, siehe Abschnitt 5 "v1.6.7"/"v1.6.8"). Falls ein Nutzer
+  mit einer dieser Serien einen FTPS-Fehler meldet: zuerst pruefen, ob
+  der automatische Fallback (Profil "a1" im zweiten Versuch) erfolgreich
+  ist - falls ja, genuegt eine einzeilige Aenderung der Zuordnungstabelle
+  fuer die betroffene Familie. Falls WEDER "x1" NOCH "a1" funktionieren,
+  waere ein komplett neues, drittes Profil noetig - dann dieselbe
+  Diagnose-Methodik wie beim A1-Mini-Fall anwenden (Vergleich mit Bambu
+  Studio, TLS-Version/Sitzungs-Wiederverwendung/Verbindungsabschluss
+  systematisch durchtesten, siehe Chronologie zu v1.5.0-v1.6.0).
 - **Ultimaker-Druckauftrag per Drag & Drop (v1.6.3-v1.6.5) - Ursache
   endgueltig geklaert durch direkte Einsicht in den echten Nachbau-
   Quellcode, Bestaetigung durch Nutzer noch ausstehend.** Erster
@@ -2150,7 +2298,7 @@ Weiterarbeit: bei jeder ausgelieferten Änderung `APP_VERSION` in
 `app.py` erhöhen (semantisch: MAJOR.MINOR.PATCH — siehe README,
 Abschnitt 0a) und einen passenden Commit-Text mitliefern.**
 
-- Aktuelle Version: **v1.6.6** (v1.1.0: Drag-&-Drop-Druckfeature,
+- Aktuelle Version: **v1.6.8** (v1.1.0: Drag-&-Drop-Druckfeature,
   macOS-Build, Versionierung selbst. v1.2.0: AMS-Zuordnung als
   bestätigbarer Dialog statt Sofort-Druck. v1.3.0: Dialog zeigt nur noch
   die für den jeweiligen Druck tatsächlich benötigten Filamente
@@ -2367,7 +2515,23 @@ Abschnitt 0a) und einen passenden Commit-Text mitliefern.**
   bewusst konservativer Toleranz [`COLOR_MATCH_TOLERANCE = 30`] — fängt
   kleine Profilabweichungen ab, verwechselt aber nicht tatsächlich
   unterschiedliche Farben wie Grün/Hellgrün [Distanz ~231]. Bestätigung
-  durch Nutzer stand zum Zeitpunkt dieser Übergabe noch aus).
+  durch Nutzer stand zum Zeitpunkt dieser Übergabe noch aus. v1.6.7:
+  neues Feature [kein Bugfix] auf Nutzerwunsch — H2-Serie [H2S, H2D,
+  H2D Pro, H2C] als dritte Druckerfamilie ergänzt. Neue Zuordnungs-
+  tabelle `BAMBU_FAMILY_TO_FTPS_PROFILE` bildet Familie auf FTPS-Profil
+  ab; für "h2" vorerst identisch zu "x1" [Nutzer-Vorgabe, mangels
+  eigener Erkenntnisse]. Kein Test gegen echte H2-Hardware möglich —
+  reine Vorsichtsannahme, kein verifiziertes Verhalten. v1.6.8: auf
+  Nutzerwunsch "auf die gleiche Weise" — P1- [P1P, P1S], P2- [P2S] und
+  X2-Serie [X2D] ergänzt, alle drei vorerst ebenfalls auf "x1" gemappt.
+  P1 dabei etwas besser abgesichert [laut Bambu direkt technisch von
+  X1 abgeleitet], X2D als offizieller X1C/X1E-Nachfolger ebenfalls
+  plausibel, P2 am unsichersten [Mischung aus P1- und H2-Technik laut
+  Recherche]. Validierung an beiden Stellen [Route, add_printer()]
+  refaktoriert: prüft jetzt gegen die Schlüssel von
+  `BAMBU_FAMILY_TO_FTPS_PROFILE` statt einer doppelt gepflegten
+  Tupel-Liste — künftige Familien brauchen dadurch nur noch einen
+  Code-Ort. Kein Test gegen echte P1-/P2-/X2-Hardware möglich).
 - `APP_VERSION` ist die einzige Quelle der Wahrheit; der GitHub-Actions-
   Workflow liest sie automatisch per Regex aus `app.py` aus.
 - Empfohlener Ablauf beim Ausliefern einer neuen Version: `APP_VERSION`
